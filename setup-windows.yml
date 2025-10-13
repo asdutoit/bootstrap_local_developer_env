@@ -1,0 +1,537 @@
+---
+# Windows Development Environment Setup
+# Package management strategy:
+# - Primary: Chocolatey (comprehensive package selection)
+# - Alternative: Scoop (developer-focused, portable apps)
+# - Fallback: Direct downloads and MSI installers
+# Automatically detects Windows version and architecture
+
+- name: Windows Development Environment Setup
+  hosts: localhost
+  connection: local
+  gather_facts: yes
+  become: no
+
+  vars:
+    # Architecture mapping for binary downloads
+    arch_map:
+      AMD64: amd64
+      x86: 386
+      ARM64: arm64
+
+    # Get the correct architecture for downloads
+    download_arch: "{{ arch_map[ansible_env.PROCESSOR_ARCHITECTURE] | default('amd64') }}"
+    
+    # Determine package manager preference
+    use_chocolatey: "{{ ansible_env.CHOCOLATEY_INSTALL_DIR is defined or 'choco' in ansible_facts.packages | default({}) }}"
+    use_scoop: "{{ ansible_env.SCOOP is defined or 'scoop' in ansible_facts.packages | default({}) }}"
+
+    # Development packages organized by package manager
+    chocolatey_packages:
+      core:
+        - git
+        - vim
+        - 7zip
+        - curl
+        - wget
+        - which
+        - grep
+        - sed
+        - jq
+        - tree
+      editors:
+        - vscode
+        - notepadplusplus
+      languages:
+        - nodejs
+        - golang
+        - rust
+        - python3  # Alternative to python from bootstrap
+      modern_cli:
+        - ripgrep
+        - bat
+        - fzf
+        - eza
+        - fd
+      databases:
+        - sqlite
+        - redis-64
+      network:
+        - nmap
+        - wireshark
+      vcs:
+        - git-lfs
+        - tortoisegit
+      cloud:
+        - terraform
+        - awscli
+        - gh
+        - azure-cli
+      containers:
+        - docker-desktop
+        - kubernetes-cli
+      development:
+        - make
+        - cmake
+        - visualstudio2022buildtools
+        - windows-sdk-10-version-2004-all
+
+    scoop_packages:
+      main:
+        - git
+        - vim
+        - 7zip
+        - curl
+        - wget
+        - grep
+        - sed
+        - jq
+        - tree
+        - nodejs
+        - go
+        - python
+        - ripgrep
+        - bat
+        - fzf
+        - fd
+        - sqlite
+        - terraform
+      extras:
+        - vscode
+        - notepadplusplus
+        - gh
+        - azure-cli
+        - docker
+        - kubectl
+
+    # Tool versions for direct downloads
+    kubectl_version: "v1.28.0"
+    
+    # Windows-specific directories
+    dev_directories:
+      - "{{ ansible_env.USERPROFILE }}\\Projects"
+      - "{{ ansible_env.USERPROFILE }}\\Scripts"
+      - "{{ ansible_env.LOCALAPPDATA }}\\bin"
+
+  tasks:
+    - name: Display Windows system information
+      debug:
+        msg: "Setting up development environment on {{ ansible_os_family }} {{ ansible_distribution_version }} ({{ ansible_env.PROCESSOR_ARCHITECTURE }})"
+
+    - name: Check package manager availability
+      win_shell: |
+        $managers = @()
+        if (Get-Command choco -ErrorAction SilentlyContinue) { $managers += "Chocolatey" }
+        if (Get-Command scoop -ErrorAction SilentlyContinue) { $managers += "Scoop" }
+        if (Get-Command winget -ErrorAction SilentlyContinue) { $managers += "Winget" }
+        $managers -join ", "
+      register: available_managers
+      changed_when: false
+
+    - name: Display package manager strategy
+      debug:
+        msg: |
+          Available package managers: {{ available_managers.stdout | trim }}
+          {% if 'Chocolatey' in available_managers.stdout %}
+          Using Chocolatey for primary package installation
+          {% elif 'Scoop' in available_managers.stdout %}
+          Using Scoop for primary package installation  
+          {% else %}
+          No package manager detected - using direct downloads where possible
+          {% endif %}
+
+    # ======================================
+    # CHOCOLATEY PACKAGE INSTALLATION
+    # ======================================
+    
+    - name: Install core packages via Chocolatey
+      win_chocolatey:
+        name: "{{ chocolatey_packages.core }}"
+        state: present
+      when: "'Chocolatey' in available_managers.stdout"
+      ignore_errors: yes
+      register: choco_core_result
+
+    - name: Install editors via Chocolatey
+      win_chocolatey:
+        name: "{{ chocolatey_packages.editors }}"
+        state: present
+      when: "'Chocolatey' in available_managers.stdout"
+      ignore_errors: yes
+
+    - name: Install languages via Chocolatey
+      win_chocolatey:
+        name: "{{ chocolatey_packages.languages }}"
+        state: present
+      when: "'Chocolatey' in available_managers.stdout"
+      ignore_errors: yes
+
+    - name: Install modern CLI tools via Chocolatey
+      win_chocolatey:
+        name: "{{ chocolatey_packages.modern_cli }}"
+        state: present
+      when: "'Chocolatey' in available_managers.stdout"
+      ignore_errors: yes
+
+    - name: Install databases via Chocolatey
+      win_chocolatey:
+        name: "{{ chocolatey_packages.databases }}"
+        state: present
+      when: "'Chocolatey' in available_managers.stdout"
+      ignore_errors: yes
+
+    - name: Install network tools via Chocolatey
+      win_chocolatey:
+        name: "{{ chocolatey_packages.network }}"
+        state: present
+      when: "'Chocolatey' in available_managers.stdout"
+      ignore_errors: yes
+
+    - name: Install VCS tools via Chocolatey
+      win_chocolatey:
+        name: "{{ chocolatey_packages.vcs }}"
+        state: present
+      when: "'Chocolatey' in available_managers.stdout"
+      ignore_errors: yes
+
+    - name: Install cloud tools via Chocolatey
+      win_chocolatey:
+        name: "{{ chocolatey_packages.cloud }}"
+        state: present
+      when: "'Chocolatey' in available_managers.stdout"
+      ignore_errors: yes
+
+    - name: Install development tools via Chocolatey
+      win_chocolatey:
+        name: "{{ chocolatey_packages.development }}"
+        state: present
+      when: "'Chocolatey' in available_managers.stdout"
+      ignore_errors: yes
+
+    # ======================================
+    # SCOOP PACKAGE INSTALLATION
+    # ======================================
+
+    - name: Install main packages via Scoop
+      win_shell: scoop install {{ item }}
+      loop: "{{ scoop_packages.main }}"
+      when: "'Scoop' in available_managers.stdout and 'Chocolatey' not in available_managers.stdout"
+      ignore_errors: yes
+      register: scoop_main_result
+
+    - name: Install extras packages via Scoop
+      win_shell: scoop install {{ item }}
+      loop: "{{ scoop_packages.extras }}"
+      when: "'Scoop' in available_managers.stdout and 'Chocolatey' not in available_managers.stdout"
+      ignore_errors: yes
+
+    # ======================================
+    # CONTAINER RUNTIME INSTALLATION
+    # ======================================
+
+    - name: Check if Docker Desktop is installed
+      win_shell: |
+        if (Get-Command docker -ErrorAction SilentlyContinue) {
+          "installed"
+        } else {
+          "not_installed"
+        }
+      register: docker_check
+      changed_when: false
+
+    - name: Install Docker Desktop via Chocolatey
+      win_chocolatey:
+        name: docker-desktop
+        state: present
+      when: "'Chocolatey' in available_managers.stdout and 'not_installed' in docker_check.stdout"
+      ignore_errors: yes
+      register: docker_install_result
+
+    - name: Install Docker Desktop via Scoop
+      win_shell: scoop install docker
+      when: "'Scoop' in available_managers.stdout and 'Chocolatey' not in available_managers.stdout and 'not_installed' in docker_check.stdout"
+      ignore_errors: yes
+
+    - name: Display Docker installation info
+      debug:
+        msg: |
+          🐳 Docker Desktop Installation:
+          {% if 'installed' in docker_check.stdout %}
+          ✅ Docker Desktop is already installed
+          {% elif docker_install_result is defined and not docker_install_result.failed %}
+          ✅ Docker Desktop installed successfully
+          {% else %}
+          ⚠️ Docker Desktop installation may have failed or requires manual setup
+          {% endif %}
+          
+          Next steps for Docker:
+          1. Start Docker Desktop from the Start Menu
+          2. Follow the Docker Desktop setup wizard
+          3. Enable WSL2 backend if available (recommended)
+          4. Test with: docker run hello-world
+
+    # ======================================
+    # KUBERNETES TOOLS INSTALLATION
+    # ======================================
+
+    - name: Check if kubectl is installed
+      win_shell: |
+        if (Get-Command kubectl -ErrorAction SilentlyContinue) {
+          kubectl version --client --short 2>$null
+        } else {
+          "not_installed"
+        }
+      register: kubectl_check
+      changed_when: false
+
+    - name: Download kubectl (if not installed via package manager)
+      win_get_url:
+        url: "https://dl.k8s.io/release/{{ kubectl_version }}/bin/windows/{{ download_arch }}/kubectl.exe"
+        dest: "{{ ansible_env.LOCALAPPDATA }}\\bin\\kubectl.exe"
+      when: "'not_installed' in kubectl_check.stdout"
+      ignore_errors: yes
+
+    - name: Install Minikube via Chocolatey
+      win_chocolatey:
+        name: minikube
+        state: present
+      when: "'Chocolatey' in available_managers.stdout"
+      ignore_errors: yes
+
+    - name: Install Minikube via Scoop
+      win_shell: scoop install minikube
+      when: "'Scoop' in available_managers.stdout and 'Chocolatey' not in available_managers.stdout"
+      ignore_errors: yes
+
+    # ======================================
+    # WINDOWS SUBSYSTEM FOR LINUX (WSL2)
+    # ======================================
+
+    - name: Check WSL2 status
+      win_shell: |
+        try {
+          $wslStatus = wsl --status 2>$null
+          if ($wslStatus) {
+            "enabled"
+          } else {
+            "not_enabled"
+          }
+        } catch {
+          "not_available"
+        }
+      register: wsl_status
+      changed_when: false
+      ignore_errors: yes
+
+    - name: Display WSL2 information
+      debug:
+        msg: |
+          🐧 Windows Subsystem for Linux (WSL2):
+          {% if 'enabled' in wsl_status.stdout %}
+          ✅ WSL2 is enabled and available
+          - You can use Linux containers with Docker Desktop
+          - Consider installing Ubuntu: wsl --install -d Ubuntu
+          {% elif 'not_enabled' in wsl_status.stdout %}
+          ⚠️ WSL2 is available but not enabled
+          - Enable with: dism.exe /online /enable-feature /featurename:Microsoft-Windows-Subsystem-Linux /all /norestart
+          - Then: dism.exe /online /enable-feature /featurename:VirtualMachinePlatform /all /norestart
+          - Reboot and run: wsl --set-default-version 2
+          {% else %}
+          ❌ WSL2 not available on this Windows version
+          - Windows 10 version 1903+ or Windows 11 required
+          {% endif %}
+
+    # ======================================
+    # DEVELOPMENT DIRECTORIES AND CONFIGURATION
+    # ======================================
+
+    - name: Create development directories
+      win_file:
+        path: "{{ item }}"
+        state: directory
+      loop: "{{ dev_directories }}"
+
+    - name: Add local bin to PATH
+      win_path:
+        elements:
+          - "{{ ansible_env.LOCALAPPDATA }}\\bin"
+        state: present
+        scope: user
+
+    - name: Configure Git defaults
+      win_shell: |
+        git config --global init.defaultBranch main
+        git config --global pull.rebase false
+      ignore_errors: yes
+
+    - name: Create PowerShell profile with useful aliases
+      win_copy:
+        dest: "{{ ansible_env.USERPROFILE }}\\Documents\\WindowsPowerShell\\Microsoft.PowerShell_profile.ps1"
+        content: |
+          # Development Environment Aliases and Functions
+          # Auto-generated by development environment setup
+
+          # Useful aliases
+          Set-Alias ll Get-ChildItem
+          Set-Alias la Get-ChildItem
+          Set-Alias grep Select-String
+          Set-Alias which Get-Command
+          
+          # Git aliases
+          function gst { git status }
+          function gco { git checkout $args }
+          function gpl { git pull }
+          function gps { git push }
+          
+          # Directory navigation
+          function projects { Set-Location "$env:USERPROFILE\Projects" }
+          function scripts { Set-Location "$env:USERPROFILE\Scripts" }
+          
+          # Docker shortcuts (if available)
+          function dps { docker ps $args }
+          function dimg { docker images $args }
+          
+          # Kubernetes shortcuts (if available)  
+          function kget { kubectl get $args }
+          function kdesc { kubectl describe $args }
+          
+          Write-Host "🚀 Development environment loaded!" -ForegroundColor Green
+          Write-Host "Available shortcuts: projects, scripts, gst, gco, gpl, gps" -ForegroundColor Blue
+        force: no
+
+    - name: Create useful batch files for common tasks
+      win_copy:
+        dest: "{{ ansible_env.USERPROFILE }}\\Scripts\\{{ item.name }}"
+        content: "{{ item.content }}"
+      loop:
+        - name: dev-info.bat
+          content: |
+            @echo off
+            echo 🎉 Windows Development Environment Information
+            echo.
+            echo 🖥️  System: %OS% %PROCESSOR_ARCHITECTURE%
+            echo 📁 Development Directories:
+            echo   - %USERPROFILE%\Projects (your code projects)  
+            echo   - %USERPROFILE%\Scripts (utility scripts)
+            echo   - %LOCALAPPDATA%\bin (user binaries)
+            echo.
+            echo 📦 Installed Tools:
+            where git >nul 2>&1 && echo ✅ Git || echo ❌ Git
+            where python >nul 2>&1 && echo ✅ Python || echo ❌ Python  
+            where node >nul 2>&1 && echo ✅ Node.js || echo ❌ Node.js
+            where docker >nul 2>&1 && echo ✅ Docker || echo ❌ Docker
+            where kubectl >nul 2>&1 && echo ✅ kubectl || echo ❌ kubectl
+            where code >nul 2>&1 && echo ✅ VS Code || echo ❌ VS Code
+            where gh >nul 2>&1 && echo ✅ GitHub CLI || echo ❌ GitHub CLI
+            where az >nul 2>&1 && echo ✅ Azure CLI || echo ❌ Azure CLI
+            echo.
+            echo 🚀 Happy coding!
+            pause
+
+    # ======================================
+    # CREATE SETUP INFORMATION SCRIPT
+    # ======================================
+
+    - name: Create comprehensive setup information script
+      win_copy:
+        dest: "{{ ansible_env.USERPROFILE }}\\Scripts\\dev-setup-info.ps1"
+        content: |
+          # Windows Development Environment Information
+          # Auto-generated by Ansible setup
+
+          Write-Host "🎉 Windows Development Environment Setup Completed!" -ForegroundColor Green
+          Write-Host ""
+          Write-Host "🖥️  System: $($env:OS) $($env:PROCESSOR_ARCHITECTURE)" -ForegroundColor Blue
+          Write-Host ""
+          Write-Host "📦 Installed Tools:" -ForegroundColor Yellow
+
+          $tools = @(
+              @{Name="Git"; Command="git"},
+              @{Name="Python"; Command="python"},
+              @{Name="Node.js"; Command="node"},  
+              @{Name="Go"; Command="go"},
+              @{Name="Rust"; Command="rustc"},
+              @{Name="Docker"; Command="docker"},
+              @{Name="kubectl"; Command="kubectl"},
+              @{Name="VS Code"; Command="code"},
+              @{Name="GitHub CLI"; Command="gh"},
+              @{Name="Azure CLI"; Command="az"},
+              @{Name="Terraform"; Command="terraform"},
+              @{Name="ripgrep"; Command="rg"},
+              @{Name="bat"; Command="bat"},
+              @{Name="fzf"; Command="fzf"}
+          )
+
+          foreach ($tool in $tools) {
+              try {
+                  Get-Command $tool.Command -ErrorAction Stop | Out-Null
+                  Write-Host "  ✅ $($tool.Name)" -ForegroundColor Green
+              } catch {
+                  Write-Host "  ❌ $($tool.Name)" -ForegroundColor Red
+              }
+          }
+
+          Write-Host ""
+          Write-Host "📁 Created Directories:" -ForegroundColor Yellow
+          Write-Host "  - $env:USERPROFILE\Projects (your code projects)"
+          Write-Host "  - $env:USERPROFILE\Scripts (utility scripts)"  
+          Write-Host "  - $env:LOCALAPPDATA\bin (user binaries)"
+          Write-Host ""
+          Write-Host "🐳 Container Runtime:" -ForegroundColor Yellow
+          if (Get-Command docker -ErrorAction SilentlyContinue) {
+              Write-Host "  - Docker Desktop installed"
+              Write-Host "  - Start Docker Desktop from Start Menu"
+              Write-Host "  - Enable WSL2 backend for better performance"
+          } else {
+              Write-Host "  - Docker not detected - install manually if needed"
+          }
+          Write-Host ""
+          Write-Host "📋 Next Steps:" -ForegroundColor Cyan
+          Write-Host "  1. Restart PowerShell to apply PATH changes"
+          Write-Host "  2. Start Docker Desktop (if installed)"
+          Write-Host "  3. Test tools: docker run hello-world"
+          Write-Host "  4. Test cloud tools: gh --version && az --version"  
+          Write-Host "  5. Start coding in $env:USERPROFILE\Projects\"
+          Write-Host ""
+          Write-Host "💡 Pro Tips:" -ForegroundColor Magenta
+          Write-Host "  - Use PowerShell profile for custom aliases"
+          Write-Host "  - Enable WSL2 for Linux development"
+          Write-Host "  - Use Windows Terminal for better CLI experience"
+          Write-Host "  - Consider Git Bash for Unix-like commands"
+
+    - name: Display completion message
+      debug:
+        msg: |
+          🎉 Windows Development Environment Setup Completed!
+
+          🖥️  Target System: {{ ansible_os_family }} {{ ansible_distribution_version }} ({{ ansible_env.PROCESSOR_ARCHITECTURE }})
+
+          📦 Installed Components:
+          {% if 'Chocolatey' in available_managers.stdout %}
+          - Package manager: Chocolatey
+          {% elif 'Scoop' in available_managers.stdout %}
+          - Package manager: Scoop  
+          {% endif %}
+          - Core development tools (git, vim, curl, jq, etc.)
+          - Editors: VS Code, Notepad++
+          - Languages: Node.js, Go, Rust (via package manager)
+          - Containers: Docker Desktop
+          - Cloud tools: GitHub CLI, Azure CLI, Terraform
+          - Kubernetes: kubectl, minikube
+          - Modern CLI: ripgrep, bat, fzf, eza
+
+          📁 Environment Ready:
+          - Development directories created (Projects, Scripts, bin)
+          - PowerShell profile configured with aliases
+          - Git defaults set
+          - PATH updated with local bin directory
+
+          📋 Next Steps:
+          1. Restart PowerShell/Command Prompt
+          2. Start Docker Desktop from Start Menu
+          3. Test containers: docker run hello-world
+          4. Test cloud tools: gh --version && az --version
+          5. Run detailed info: ~\Scripts\dev-setup-info.ps1
+          6. Start developing in ~\Projects\
+
+          🚀 Happy coding on Windows!

@@ -1,0 +1,1396 @@
+---
+# Universal Development Environment Setup
+# OS-specific container runtime strategy:
+# - macOS: Docker Desktop + Docker Compose
+# - Ubuntu/CentOS: Podman (Docker CLI compatible)
+# Automatically detects OS, architecture, and package managers
+
+- name: Universal Development Environment Setup
+  hosts: localhost
+  connection: local
+  gather_facts: yes
+  become: no
+
+  vars:
+    # Architecture mapping for binary downloads
+    arch_map:
+      x86_64: amd64
+      aarch64: arm64
+      armv7l: arm
+
+    # Get the correct architecture for downloads
+    download_arch: "{{ arch_map[ansible_architecture] | default('amd64') }}"
+
+    # Development packages organized by OS
+    packages:
+      ubuntu:
+        core:
+          - git
+          - vim
+          - neovim
+          - htop
+          - tree
+          - jq
+          - unzip
+          - build-essential
+          - curl
+          - wget
+          - tar
+          - which
+          - sudo
+          - zsh
+          - tmux
+          - gnome-tweaks
+          - chromium-browser
+          - libcanberra-gtk-module
+          - libcanberra-gtk3-module
+        editors:
+          - code
+        languages:
+          - nodejs
+          - npm
+          - golang-go
+          - rustc
+          - cargo
+        modern_cli:
+          - fzf
+          - ripgrep
+          - bat
+          - eza  # Modern replacement for exa
+          - ncdu
+        databases:
+          - sqlite3
+          - redis-tools
+        network:
+          - netcat-openbsd
+        vcs:
+          - git-lfs
+          - meld
+        cloud:
+          - terraform
+          - awscli
+          - gh
+          - azure-cli
+
+      centos:
+        core:
+          - git
+          - vim
+          - neovim
+          - htop
+          - tree
+          - jq
+          - unzip
+          - gcc
+          - gcc-c++
+          - make
+          - curl
+          - wget
+          - tar
+          - which
+          - sudo
+          - zsh
+          - tmux
+          - chromium
+          - gtk3-devel  # For GUI applications like Podman Desktop
+          - libcanberra-gtk3  # For GTK sound support
+        editors:
+          - code
+        languages:
+          - nodejs
+          - npm
+          - golang
+          - rust
+          - cargo
+        modern_cli:
+          - fzf
+          - ripgrep
+          - bat
+          # Note: eza may not be available in CentOS repos, will be handled separately
+          - ncdu
+        databases:
+          - sqlite
+          # redis not available in standard CentOS repos - requires EPEL or manual install
+        network:
+          - nmap-ncat  # CentOS equivalent of netcat
+        vcs:
+          - git-lfs
+          - meld
+        cloud:
+          - gh
+          # terraform - not available in standard repos, installed separately from HashiCorp
+          # azure-cli - installed separately from Microsoft repos
+
+      macos:
+        core:
+          - git
+          - vim
+          - htop
+          - tree
+          - jq
+        languages:
+          - node
+          - go
+          - rust
+        cloud:
+          - terraform
+          - awscli
+        browsers:
+          - chromium
+        tools:
+          - bruno
+          - visual-studio-code
+
+    # Container runtime versions (updated January 2025)
+    kubectl_version: "v1.31.4"  # Latest stable as of Jan 2025
+    minikube_version: "v1.34.0"  # Latest stable as of Jan 2025
+
+  tasks:
+    - name: Display system information
+      debug:
+        msg: "Setting up development environment on {{ ansible_distribution }} {{ ansible_distribution_version }} ({{ ansible_architecture }})"
+
+    - name: Detect package managers
+      set_fact:
+        has_dnf: "{{ ansible_pkg_mgr == 'dnf' or (ansible_facts.packages is defined and 'dnf' in ansible_facts.packages) }}"
+        has_apt: "{{ ansible_pkg_mgr == 'apt' }}"
+        has_brew: "{{ ansible_os_family == 'Darwin' }}"
+        use_dnf: "{{ (ansible_os_family == 'RedHat') and (ansible_pkg_mgr == 'dnf' or (ansible_facts.packages is defined and 'dnf' in ansible_facts.packages)) }}"
+
+    # ======================================
+    # PACKAGE REPOSITORY SETUP
+    # ======================================
+
+    - name: Install EPEL repository (CentOS/RHEL with dnf)
+      dnf:
+        name: epel-release
+        state: present
+        update_cache: yes
+      become: yes
+      when: ansible_os_family == "RedHat" and use_dnf
+      ignore_errors: yes
+
+    - name: Install EPEL repository (CentOS/RHEL with yum)
+      yum:
+        name: epel-release
+        state: present
+        update_cache: yes
+      become: yes
+      when: ansible_os_family == "RedHat" and not use_dnf
+      ignore_errors: yes
+
+    - name: Update package cache (Ubuntu/Debian)
+      apt:
+        update_cache: yes
+        cache_valid_time: 3600
+      become: yes
+      when: ansible_os_family == "Debian"
+      ignore_errors: yes
+
+    - name: Update Homebrew (macOS)
+      homebrew:
+        update_homebrew: yes
+      when: ansible_os_family == "Darwin"
+      ignore_errors: yes
+
+    # ======================================
+    # ADDITIONAL REPOSITORY SETUP
+    # ======================================
+
+    # VS Code repository for CentOS/RHEL
+    - name: Import Microsoft GPG key for VS Code (CentOS/RHEL)
+      rpm_key:
+        state: present
+        key: https://packages.microsoft.com/keys/microsoft.asc
+      become: yes
+      when: ansible_os_family == "RedHat"
+      ignore_errors: yes
+
+    - name: Add VS Code repository (CentOS/RHEL)
+      yum_repository:
+        name: code
+        description: Visual Studio Code
+        baseurl: https://packages.microsoft.com/yumrepos/vscode
+        gpgcheck: yes
+        gpgkey: https://packages.microsoft.com/keys/microsoft.asc
+        enabled: yes
+      become: yes
+      when: ansible_os_family == "RedHat"
+      ignore_errors: yes
+
+    # GitHub CLI repository for CentOS/RHEL
+    - name: Add GitHub CLI repository (CentOS/RHEL with dnf)
+      dnf:
+        name: "dnf-plugins-core"
+        state: present
+      become: yes
+      when: ansible_os_family == "RedHat" and use_dnf
+      ignore_errors: yes
+
+    - name: Add GitHub CLI repository (CentOS/RHEL with dnf)
+      shell: |
+        dnf config-manager --add-repo https://cli.github.com/packages/rpm/gh-cli.repo
+      become: yes
+      when: ansible_os_family == "RedHat" and use_dnf
+      ignore_errors: yes
+
+    - name: Add GitHub CLI repository (CentOS/RHEL with yum)
+      shell: |
+        curl -fsSL https://cli.github.com/packages/rpm/gh-cli.repo | tee /etc/yum.repos.d/gh-cli.repo
+      become: yes
+      when: ansible_os_family == "RedHat" and not use_dnf
+      ignore_errors: yes
+
+    # Azure CLI repository for CentOS/RHEL
+    - name: Detect CentOS/RHEL version for Azure CLI
+      set_fact:
+        rhel_major_version: "{{ ansible_distribution_major_version }}"
+      when: ansible_os_family == "RedHat"
+
+    - name: Import Microsoft GPG key (CentOS/RHEL 10+)
+      rpm_key:
+        key: https://packages.microsoft.com/keys/microsoft-2025.asc
+        state: present
+      become: yes
+      when: ansible_os_family == "RedHat" and ansible_distribution_major_version|int >= 10
+      ignore_errors: yes
+
+    - name: Import Microsoft GPG key (CentOS/RHEL 9 and below)
+      rpm_key:
+        key: https://packages.microsoft.com/keys/microsoft.asc
+        state: present
+      become: yes
+      when: ansible_os_family == "RedHat" and ansible_distribution_major_version|int < 10
+      ignore_errors: yes
+
+    - name: Add Microsoft repository package (CentOS/RHEL with dnf)
+      dnf:
+        name: "https://packages.microsoft.com/config/rhel/{{ ansible_distribution_major_version }}.0/packages-microsoft-prod.rpm"
+        state: present
+        disable_gpg_check: yes
+      become: yes
+      when: ansible_os_family == "RedHat" and use_dnf
+      ignore_errors: yes
+
+    - name: Add Microsoft repository package (CentOS/RHEL with yum)
+      yum:
+        name: "https://packages.microsoft.com/config/rhel/{{ ansible_distribution_major_version }}.0/packages-microsoft-prod.rpm"
+        state: present
+        disable_gpg_check: yes
+      become: yes
+      when: ansible_os_family == "RedHat" and not use_dnf
+      ignore_errors: yes
+
+    # GitHub CLI repository for Ubuntu/Debian
+    - name: Add GitHub CLI GPG key (Ubuntu/Debian)
+      apt_key:
+        url: https://cli.github.com/packages/githubcli-archive-keyring.gpg
+        keyring: /usr/share/keyrings/githubcli-archive-keyring.gpg
+        state: present
+      become: yes
+      when: ansible_os_family == "Debian"
+      ignore_errors: yes
+
+    - name: Add GitHub CLI repository (Ubuntu/Debian)
+      apt_repository:
+        repo: "deb [arch={{ download_arch }} signed-by=/usr/share/keyrings/githubcli-archive-keyring.gpg] https://cli.github.com/packages stable main"
+        state: present
+      become: yes
+      when: ansible_os_family == "Debian"
+      ignore_errors: yes
+
+    # Azure CLI repository for Ubuntu/Debian
+    - name: Install Azure CLI prerequisites (Ubuntu/Debian)
+      apt:
+        name:
+          - ca-certificates
+          - curl
+          - apt-transport-https
+          - lsb-release
+          - gnupg
+        state: present
+      become: yes
+      when: ansible_os_family == "Debian"
+      ignore_errors: yes
+
+    - name: Add Microsoft GPG key (Ubuntu/Debian)
+      apt_key:
+        url: https://packages.microsoft.com/keys/microsoft.asc
+        state: present
+      become: yes
+      when: ansible_os_family == "Debian"
+      ignore_errors: yes
+
+    - name: Add Azure CLI repository (Ubuntu/Debian)
+      apt_repository:
+        repo: "deb [arch={{ download_arch }}] https://packages.microsoft.com/repos/azure-cli/ {{ ansible_distribution_release }} main"
+        state: present
+      become: yes
+      when: ansible_os_family == "Debian"
+      ignore_errors: yes
+
+    # VS Code repository for Ubuntu/Debian
+    - name: Add VS Code repository (Ubuntu/Debian)
+      apt_repository:
+        repo: "deb [arch={{ download_arch }},signed-by=/etc/apt/keyrings/packages.microsoft.gpg] https://packages.microsoft.com/repos/code stable main"
+        state: present
+      become: yes
+      when: ansible_os_family == "Debian"
+      ignore_errors: yes
+
+    - name: Create Microsoft GPG keyring directory (Ubuntu/Debian)
+      file:
+        path: /etc/apt/keyrings
+        state: directory
+        mode: "0755"
+      become: yes
+      when: ansible_os_family == "Debian"
+      ignore_errors: yes
+
+    - name: Download Microsoft GPG key for VS Code (Ubuntu/Debian)
+      get_url:
+        url: https://packages.microsoft.com/keys/microsoft.asc
+        dest: /tmp/microsoft.asc
+      when: ansible_os_family == "Debian"
+      ignore_errors: yes
+
+    - name: Import Microsoft GPG key for VS Code (Ubuntu/Debian)
+      shell: |
+        cat /tmp/microsoft.asc | gpg --dearmor > /etc/apt/keyrings/packages.microsoft.gpg
+      become: yes
+      when: ansible_os_family == "Debian"
+      ignore_errors: yes
+
+    # Update package cache after adding repositories
+    - name: Update package cache after repository setup (Ubuntu/Debian)
+      apt:
+        update_cache: yes
+      become: yes
+      when: ansible_os_family == "Debian"
+      ignore_errors: yes
+
+    - name: Update package cache after repository setup (CentOS/RHEL with dnf)
+      dnf:
+        update_cache: yes
+      become: yes
+      when: ansible_os_family == "RedHat" and use_dnf
+      ignore_errors: yes
+
+    - name: Update package cache after repository setup (CentOS/RHEL with yum)
+      yum:
+        update_cache: yes
+      become: yes
+      when: ansible_os_family == "RedHat" and not use_dnf
+      ignore_errors: yes
+
+    # ======================================
+    # CORE DEVELOPMENT PACKAGES
+    # ======================================
+
+    # Install packages in separate tasks to handle failures gracefully
+    - name: Install core packages (Ubuntu/Debian)
+      apt:
+        name: "{{ packages.ubuntu.core }}"
+        state: present
+      become: yes
+      when: ansible_os_family == "Debian"
+      ignore_errors: yes
+
+    - name: Install editors (Ubuntu/Debian)
+      apt:
+        name: "{{ packages.ubuntu.editors }}"
+        state: present
+      become: yes
+      when: ansible_os_family == "Debian"
+      ignore_errors: yes
+
+    - name: Install languages (Ubuntu/Debian)
+      apt:
+        name: "{{ packages.ubuntu.languages }}"
+        state: present
+      become: yes
+      when: ansible_os_family == "Debian"
+      ignore_errors: yes
+
+    - name: Install modern CLI tools (Ubuntu/Debian)
+      apt:
+        name: "{{ item }}"
+        state: present
+      become: yes
+      loop: "{{ packages.ubuntu.modern_cli }}"
+      when: ansible_os_family == "Debian"
+      ignore_errors: yes
+
+    - name: Install databases (Ubuntu/Debian)
+      apt:
+        name: "{{ packages.ubuntu.databases }}"
+        state: present
+      become: yes
+      when: ansible_os_family == "Debian"
+      ignore_errors: yes
+
+    - name: Install network tools (Ubuntu/Debian)
+      apt:
+        name: "{{ packages.ubuntu.network }}"
+        state: present
+      become: yes
+      when: ansible_os_family == "Debian"
+      ignore_errors: yes
+
+    - name: Install VCS tools (Ubuntu/Debian)
+      apt:
+        name: "{{ packages.ubuntu.vcs }}"
+        state: present
+      become: yes
+      when: ansible_os_family == "Debian"
+      ignore_errors: yes
+
+    - name: Install cloud tools (Ubuntu/Debian)
+      apt:
+        name: "{{ packages.ubuntu.cloud }}"
+        state: present
+      become: yes
+      when: ansible_os_family == "Debian"
+      ignore_errors: yes
+
+    # Install CentOS/RHEL packages in separate tasks to handle failures gracefully
+    - name: Install core packages (CentOS/RHEL with dnf)
+      dnf:
+        name: "{{ packages.centos.core }}"
+        state: present
+        update_cache: yes
+      become: yes
+      when: ansible_os_family == "RedHat" and use_dnf
+      ignore_errors: yes
+
+    - name: Install core packages (CentOS/RHEL with yum)
+      yum:
+        name: "{{ packages.centos.core }}"
+        state: present
+        update_cache: yes
+      become: yes
+      when: ansible_os_family == "RedHat" and not use_dnf
+      ignore_errors: yes
+
+    - name: Install editors (CentOS/RHEL with dnf)
+      dnf:
+        name: "{{ packages.centos.editors }}"
+        state: present
+      become: yes
+      when: ansible_os_family == "RedHat" and use_dnf
+      ignore_errors: yes
+
+    - name: Install editors (CentOS/RHEL with yum)
+      yum:
+        name: "{{ packages.centos.editors }}"
+        state: present
+      become: yes
+      when: ansible_os_family == "RedHat" and not use_dnf
+      ignore_errors: yes
+
+    - name: Install languages (CentOS/RHEL with dnf)
+      dnf:
+        name: "{{ packages.centos.languages }}"
+        state: present
+      become: yes
+      when: ansible_os_family == "RedHat" and use_dnf
+      ignore_errors: yes
+
+    - name: Install languages (CentOS/RHEL with yum)
+      yum:
+        name: "{{ packages.centos.languages }}"
+        state: present
+      become: yes
+      when: ansible_os_family == "RedHat" and not use_dnf
+      ignore_errors: yes
+
+    - name: Install modern CLI tools (CentOS/RHEL with dnf)
+      dnf:
+        name: "{{ item }}"
+        state: present
+      become: yes
+      loop: "{{ packages.centos.modern_cli }}"
+      when: ansible_os_family == "RedHat" and use_dnf
+      ignore_errors: yes
+
+    - name: Install modern CLI tools (CentOS/RHEL with yum)
+      yum:
+        name: "{{ item }}"
+        state: present
+      become: yes
+      loop: "{{ packages.centos.modern_cli }}"
+      when: ansible_os_family == "RedHat" and not use_dnf
+      ignore_errors: yes
+
+    - name: Install databases (CentOS/RHEL with dnf)
+      dnf:
+        name: "{{ packages.centos.databases }}"
+        state: present
+      become: yes
+      when: ansible_os_family == "RedHat" and use_dnf
+      ignore_errors: yes
+
+    - name: Install databases (CentOS/RHEL with yum)
+      yum:
+        name: "{{ packages.centos.databases }}"
+        state: present
+      become: yes
+      when: ansible_os_family == "RedHat" and not use_dnf
+      ignore_errors: yes
+
+    - name: Install network tools (CentOS/RHEL with dnf)
+      dnf:
+        name: "{{ packages.centos.network }}"
+        state: present
+      become: yes
+      when: ansible_os_family == "RedHat" and use_dnf
+      ignore_errors: yes
+
+    - name: Install network tools (CentOS/RHEL with yum)
+      yum:
+        name: "{{ packages.centos.network }}"
+        state: present
+      become: yes
+      when: ansible_os_family == "RedHat" and not use_dnf
+      ignore_errors: yes
+
+    - name: Install VCS tools (CentOS/RHEL with dnf)
+      dnf:
+        name: "{{ packages.centos.vcs }}"
+        state: present
+      become: yes
+      when: ansible_os_family == "RedHat" and use_dnf
+      ignore_errors: yes
+
+    - name: Install VCS tools (CentOS/RHEL with yum)
+      yum:
+        name: "{{ packages.centos.vcs }}"
+        state: present
+      become: yes
+      when: ansible_os_family == "RedHat" and not use_dnf
+      ignore_errors: yes
+
+    - name: Install cloud tools (CentOS/RHEL with dnf)
+      dnf:
+        name: "{{ packages.centos.cloud }}"
+        state: present
+      become: yes
+      when: ansible_os_family == "RedHat" and use_dnf
+      ignore_errors: yes
+
+    - name: Install cloud tools (CentOS/RHEL with yum)
+      yum:
+        name: "{{ packages.centos.cloud }}"
+        state: present
+      become: yes
+      when: ansible_os_family == "RedHat" and not use_dnf
+      ignore_errors: yes
+
+    # Try to install Redis from EPEL on CentOS/RHEL
+    - name: Install Redis from EPEL (CentOS/RHEL with dnf)
+      dnf:
+        name: redis
+        state: present
+        enablerepo: epel
+      become: yes
+      when: ansible_os_family == "RedHat" and use_dnf
+      ignore_errors: yes
+      register: centos_redis_dnf
+
+    - name: Install Redis from EPEL (CentOS/RHEL with yum)
+      yum:
+        name: redis
+        state: present
+        enablerepo: epel
+      become: yes
+      when: ansible_os_family == "RedHat" and not use_dnf
+      ignore_errors: yes
+      register: centos_redis_yum
+
+    - name: Display Redis installation result (CentOS/RHEL)
+      debug:
+        msg: |
+          {% if (centos_redis_dnf.failed | default(false)) or (centos_redis_yum.failed | default(false)) %}
+          ⚠️ Redis not available in repositories. Install manually if needed:
+            sudo dnf install redis  # After enabling EPEL
+          {% else %}
+          ✅ Redis installation attempted from EPEL
+          {% endif %}
+      when: ansible_os_family == "RedHat"
+
+    # Install alternative packages that may fail on CentOS
+    - name: Install alternative packages (CentOS/RHEL with dnf)
+      dnf:
+        name: "{{ item }}"
+        state: present
+      become: yes
+      loop:
+        - chromium-browser  # Alternative to chromium
+        - redis  # Try again in case EPEL wasn't available earlier
+      when: ansible_os_family == "RedHat" and use_dnf
+      ignore_errors: yes
+
+    - name: Install alternative packages (CentOS/RHEL with yum)
+      yum:
+        name: "{{ item }}"
+        state: present
+      become: yes
+      loop:
+        - chromium-browser  # Alternative to chromium
+        - redis  # Try again in case EPEL wasn't available earlier
+      when: ansible_os_family == "RedHat" and not use_dnf
+      ignore_errors: yes
+
+    # Install eza manually for CentOS/RHEL (not available in standard repos)
+    - name: Check if eza is already installed (CentOS/RHEL)
+      command: eza --version
+      register: eza_check
+      failed_when: false
+      changed_when: false
+      when: ansible_os_family == "RedHat"
+
+    - name: Download and install eza binary (CentOS/RHEL)
+      get_url:
+        url: "https://github.com/eza-community/eza/releases/latest/download/eza_{{ ansible_architecture }}-unknown-linux-gnu.tar.gz"
+        dest: /tmp/eza.tar.gz
+        mode: '0644'
+      when: ansible_os_family == "RedHat" and eza_check.rc != 0
+      ignore_errors: yes
+
+    - name: Extract and install eza (CentOS/RHEL)
+      unarchive:
+        src: /tmp/eza.tar.gz
+        dest: /usr/local/bin/
+        remote_src: yes
+        creates: /usr/local/bin/eza
+        mode: '0755'
+      become: yes
+      when: ansible_os_family == "RedHat" and eza_check.rc != 0
+      ignore_errors: yes
+
+    # Handle Node.js separately to avoid conflicts
+    - name: Check if Node.js is already installed (CentOS/RHEL)
+      command: node --version
+      register: nodejs_check
+      failed_when: false
+      changed_when: false
+      when: ansible_os_family == "RedHat"
+
+    - name: Install Node.js and npm (CentOS/RHEL with dnf) - handle conflicts
+      dnf:
+        name:
+          - nodejs
+          - npm
+        state: present
+        allowerasing: yes # This allows replacing conflicting packages
+      become: yes
+      when: ansible_os_family == "RedHat" and use_dnf and nodejs_check.rc != 0
+      ignore_errors: yes
+
+    - name: Install Node.js and npm (CentOS/RHEL with yum) - handle conflicts
+      yum:
+        name:
+          - nodejs
+          - npm
+        state: present
+      become: yes
+      when: ansible_os_family == "RedHat" and not use_dnf and nodejs_check.rc != 0
+      ignore_errors: yes
+
+    - name: Display Node.js version if already installed
+      debug:
+        msg: "Node.js is already installed: {{ nodejs_check.stdout }}"
+      when: ansible_os_family == "RedHat" and nodejs_check.rc == 0
+
+    - name: Install core packages (macOS)
+      homebrew:
+        name: "{{ packages.macos.core + packages.macos.languages + packages.macos.cloud }}"
+        state: present
+      when: ansible_os_family == "Darwin"
+      ignore_errors: yes
+
+    - name: Install macOS browsers and tools
+      homebrew_cask:
+        name: "{{ packages.macos.browsers + packages.macos.tools }}"
+        state: present
+      when: ansible_os_family == "Darwin"
+      ignore_errors: yes
+
+    # ======================================
+    # CONTAINER RUNTIME INSTALLATION
+    # Strategy: macOS=Docker Desktop, Linux=Podman
+    # ======================================
+
+    - name: Check if container runtime is already installed
+      shell: |
+        if command -v podman >/dev/null 2>&1; then
+          echo "podman"
+        elif command -v docker >/dev/null 2>&1; then
+          echo "docker"
+        else
+          echo "none"
+        fi
+      register: container_runtime_check
+      changed_when: false
+
+    - name: Display container runtime strategy
+      debug:
+        msg: |
+          Container runtime strategy for {{ ansible_os_family }} ({{ ansible_architecture }}):
+          {% if ansible_os_family == "Darwin" %}
+          - Installing Docker Desktop + Docker Compose (native macOS experience)
+          {% else %}
+          - Installing Podman (Docker CLI compatible, rootless, no daemon)
+          {% endif %}
+
+    - name: Container runtime installation
+      block:
+        # MACOS: Docker Desktop + Docker Compose
+        - name: Install Docker Desktop (macOS)
+          homebrew_cask:
+            name: docker
+            state: present
+          when: ansible_os_family == "Darwin"
+          register: macos_docker_install
+
+        - name: Install Docker Compose via Homebrew (macOS)
+          homebrew:
+            name: docker-compose
+            state: present
+          when: ansible_os_family == "Darwin"
+          ignore_errors: yes
+
+        # UBUNTU/DEBIAN: Podman (Docker CLI compatible)
+        - name: Install Podman and related tools (Ubuntu/Debian)
+          apt:
+            name:
+              - podman
+              - podman-docker
+              - buildah
+              - skopeo
+            state: present
+            update_cache: yes
+          become: yes
+          when: ansible_os_family == "Debian"
+          register: ubuntu_podman_install
+          ignore_errors: yes
+
+        # CENTOS/RHEL: Podman (Docker CLI compatible)
+        - name: Install Podman and related tools (CentOS/RHEL with dnf)
+          dnf:
+            name:
+              - podman
+              - podman-docker
+              - podman-compose
+              - buildah
+              - skopeo
+            state: present
+            update_cache: yes
+          become: yes
+          when: ansible_os_family == "RedHat" and use_dnf
+          register: centos_podman_dnf_install
+          ignore_errors: yes
+
+        - name: Install Podman and Docker compatibility (CentOS/RHEL with yum)
+          yum:
+            name:
+              - podman
+              - podman-docker
+            state: present
+            update_cache: yes
+          become: yes
+          when: ansible_os_family == "RedHat" and not use_dnf
+          register: centos_podman_yum_install
+          ignore_errors: yes
+
+      when: container_runtime_check.stdout == "none"
+
+    # ======================================
+    # CONTAINER RUNTIME CONFIGURATION
+    # ======================================
+
+    - name: Configure Docker Desktop (macOS)
+      block:
+        - name: Display Docker Desktop setup instructions
+          debug:
+            msg: |
+              Docker Desktop installed on macOS!
+              - Start Docker Desktop from Applications
+              - Docker and docker-compose commands will be available after startup
+              - No additional configuration needed
+
+      when: ansible_os_family == "Darwin" and container_runtime_check.stdout == "none"
+
+    - name: Configure Podman for Docker CLI compatibility (Linux)
+      block:
+        - name: Create docker alias for podman (Linux)
+          lineinfile:
+            path: "{{ ansible_env.HOME }}/.bashrc"
+            line: "alias docker=podman"
+            create: yes
+
+        - name: Create docker-compose alias for podman-compose (Linux)
+          lineinfile:
+            path: "{{ ansible_env.HOME }}/.bashrc"
+            line: "alias docker-compose=podman-compose"
+            create: yes
+
+        - name: Enable Podman socket for Docker API compatibility
+          systemd:
+            name: podman.socket
+            state: started
+            enabled: yes
+            scope: user
+          ignore_errors: yes
+
+        - name: Verify Docker CLI compatibility (podman-docker package)
+          command: which docker
+          register: docker_cli_check
+          failed_when: false
+          changed_when: false
+
+        - name: Display Podman setup confirmation
+          debug:
+            msg: |
+              Podman configured with Docker CLI compatibility!
+              {% if docker_cli_check.rc == 0 %}
+              ✅ Docker CLI provided by podman-docker package: {{ docker_cli_check.stdout }}
+              {% else %}
+              ⚠️ Docker CLI not found - using alias: 'docker' commands will use Podman (via alias)
+              {% endif %}
+              - 'docker-compose' commands will use podman-compose (via alias)
+              - Containers run rootless by default (more secure)
+              - No daemon required
+              - Test with: docker --version
+
+      when: ansible_os_family != "Darwin" and container_runtime_check.stdout == "none"
+
+    # ======================================
+    # PODMAN DESKTOP INSTALLATION (GUI)
+    # ======================================
+
+    - name: Install Podman Desktop via Flatpak (Ubuntu/Debian)
+      block:
+        - name: Install Flatpak and GNOME Software plugin
+          apt:
+            name:
+              - flatpak
+              - gnome-software-plugin-flatpak
+            state: present
+            update_cache: yes
+          become: yes
+
+        - name: Add Flathub repository
+          shell: |
+            flatpak remote-add --if-not-exists --user flathub https://flathub.org/repo/flathub.flatpakrepo
+          become: false
+          register: flathub_add_result
+
+        - name: Debug Flathub repository addition
+          debug:
+            var: flathub_add_result
+
+        - name: List Flatpak remotes to verify Flathub
+          command: flatpak remotes
+          register: flatpak_remotes
+          become: false
+
+        - name: Debug Flatpak remotes
+          debug:
+            var: flatpak_remotes.stdout_lines
+
+        - name: Install Podman Desktop from Flathub
+          shell: |
+            flatpak install --user --noninteractive flathub io.podman_desktop.PodmanDesktop
+          become: false
+          register: podman_desktop_install
+
+        - name: Debug Podman Desktop installation
+          debug:
+            var: podman_desktop_install
+
+      when: ansible_os_family == "Debian"
+      ignore_errors: yes
+
+    - name: Install Podman Desktop via Flatpak (CentOS/RHEL)
+      block:
+        - name: Install Flatpak (CentOS/RHEL with dnf)
+          dnf:
+            name: flatpak
+            state: present
+            update_cache: yes
+          become: yes
+          when: use_dnf
+          register: flatpak_dnf_install
+
+        - name: Install Flatpak (CentOS/RHEL with yum)
+          yum:
+            name: flatpak
+            state: present
+            update_cache: yes
+          become: yes
+          when: not use_dnf
+          register: flatpak_yum_install
+
+        - name: Add Flathub repository (CentOS/RHEL)
+          shell: |
+            flatpak remote-add --if-not-exists --user flathub https://flathub.org/repo/flathub.flatpakrepo
+          become: false
+          register: flathub_add_result_centos
+
+        - name: Debug Flathub repository addition (CentOS/RHEL)
+          debug:
+            var: flathub_add_result_centos
+
+        - name: Install Podman Desktop from Flathub (CentOS/RHEL)
+          shell: |
+            flatpak install --user --noninteractive flathub io.podman_desktop.PodmanDesktop
+          become: false
+          register: podman_desktop_install_centos
+
+        - name: Debug Podman Desktop installation (CentOS/RHEL)
+          debug:
+            var: podman_desktop_install_centos
+
+      when: ansible_os_family == "RedHat"
+      ignore_errors: yes
+
+    - name: Display Podman Desktop installation info
+      debug:
+        msg: |
+          📱 Podman Desktop GUI installed!
+          - Launch from your applications menu or run: flatpak run io.podman_desktop.PodmanDesktop
+          - Provides a user-friendly GUI for managing containers and images
+          - Integrates with existing Podman CLI installation
+          - Supports container management, image building, and more
+      when: ansible_os_family != "Darwin"
+
+    # ======================================
+    # KUBERNETES TOOLS INSTALLATION
+    # ======================================
+
+    - name: Download kubectl binary (Linux)
+      get_url:
+        url: "https://dl.k8s.io/release/{{ kubectl_version }}/bin/linux/{{ download_arch }}/kubectl"
+        dest: /usr/local/bin/kubectl
+        mode: "0755"
+      become: yes
+      when: ansible_os_family != "Darwin"
+      ignore_errors: yes
+
+    - name: Install kubectl (macOS)
+      homebrew:
+        name: kubectl
+        state: present
+      when: ansible_os_family == "Darwin"
+      ignore_errors: yes
+
+    - name: Download Minikube binary (Linux)
+      get_url:
+        url: "https://github.com/kubernetes/minikube/releases/download/{{ minikube_version }}/minikube-linux-{{ download_arch }}"
+        dest: /usr/local/bin/minikube
+        mode: "0755"
+      become: yes
+      when: ansible_os_family != "Darwin"
+      ignore_errors: yes
+
+    - name: Install Minikube (macOS)
+      homebrew:
+        name: minikube
+        state: present
+      when: ansible_os_family == "Darwin"
+      ignore_errors: yes
+
+    # ======================================
+    # KUBERNETES CONFIGURATION FOR CENTOS/RHEL
+    # ======================================
+    
+    - name: Configure Kubernetes for CentOS/RHEL/Fedora
+      block:
+        - name: Check if CPU controller is delegated
+          shell: |
+            user_id=$(id -u)
+            if [ -f "/sys/fs/cgroup/user.slice/user-${user_id}.slice/user@${user_id}.service/cgroup.controllers" ]; then
+              cat "/sys/fs/cgroup/user.slice/user-${user_id}.slice/user@${user_id}.service/cgroup.controllers"
+            else
+              echo "not_found"
+            fi
+          register: cgroup_controllers
+          become: false
+
+        - name: Display current cgroup controllers
+          debug:
+            msg: "Current cgroup controllers: {{ cgroup_controllers.stdout }}"
+
+        - name: Create systemd user service drop-in directory
+          file:
+            path: /etc/systemd/system/user@.service.d
+            state: directory
+            mode: '0755'
+          become: yes
+          when: "'cpu' not in cgroup_controllers.stdout and cgroup_controllers.stdout != 'not_found'"
+
+        - name: Configure systemd user service delegation
+          copy:
+            content: |
+              [Service]
+              Delegate=cpu cpuset io memory pids
+            dest: /etc/systemd/system/user@.service.d/delegate.conf
+            mode: '0644'
+          become: yes
+          register: delegation_config
+          when: "'cpu' not in cgroup_controllers.stdout and cgroup_controllers.stdout != 'not_found'"
+
+        - name: Reload systemd daemon
+          systemd:
+            daemon_reload: yes
+          become: yes
+          when: delegation_config is changed
+
+        - name: Restart user service to apply delegation
+          shell: |
+            user_id=$(id -u)
+            systemctl restart "user@${user_id}.service"
+          become: yes
+          when: delegation_config is changed
+
+        - name: Wait for user service to restart
+          wait_for:
+            timeout: 5
+          when: delegation_config is changed
+
+        - name: Verify CPU controller delegation
+          shell: |
+            user_id=$(id -u)
+            if [ -f "/sys/fs/cgroup/user.slice/user-${user_id}.slice/user@${user_id}.service/cgroup.controllers" ]; then
+              cat "/sys/fs/cgroup/user.slice/user-${user_id}.slice/user@${user_id}.service/cgroup.controllers"
+            else
+              echo "not_found"
+            fi
+          register: updated_cgroup_controllers
+          become: false
+          when: delegation_config is changed
+
+        - name: Display updated cgroup controllers
+          debug:
+            msg: |
+              {% if delegation_config is changed %}
+              Updated cgroup controllers: {{ updated_cgroup_controllers.stdout }}
+              {% if 'cpu' in updated_cgroup_controllers.stdout %}
+              ✅ CPU controller delegation enabled successfully
+              {% else %}
+              ⚠️  CPU controller delegation may not be active yet. A reboot may be required.
+              {% endif %}
+              {% else %}
+              CPU controller already delegated or delegation not needed
+              {% endif %}
+
+        - name: Configure Minikube for rootless Podman
+          shell: |
+            minikube config set rootless true
+            minikube config set driver podman
+          become: false
+          register: minikube_config
+          failed_when: false
+          changed_when: false
+
+        - name: Display Minikube configuration result
+          debug:
+            msg: |
+              🚢 Minikube configured for rootless Podman!
+              
+              To start your Kubernetes cluster:
+                minikube start
+              
+              To check cluster status:
+                minikube status
+                kubectl get nodes
+              
+              Note: If this is the first setup, CPU delegation may require a reboot to be fully active.
+
+      when: ansible_os_family == "RedHat"
+      ignore_errors: yes
+
+    # ======================================
+    # CLOUD CLI TOOLS (installed via main package lists)
+    # ======================================
+    # GitHub CLI and Azure CLI are now installed via the main package
+    # installation tasks after repository setup above
+
+    # macOS still needs separate installation since not in main package lists
+    - name: Install GitHub CLI (macOS)
+      homebrew:
+        name: gh
+        state: present
+      when: ansible_os_family == "Darwin"
+      ignore_errors: yes
+
+    - name: Install Azure CLI (macOS)
+      homebrew:
+        name: azure-cli
+        state: present
+      when: ansible_os_family == "Darwin"
+      ignore_errors: yes
+
+    - name: Install Azure CLI (Ubuntu/Debian)
+      apt:
+        name: azure-cli
+        state: present
+      become: yes
+      when: ansible_os_family == "Debian"
+      ignore_errors: yes
+
+    # CentOS/RHEL Azure CLI installation
+    - name: Install Azure CLI (CentOS/RHEL with dnf)
+      dnf:
+        name: azure-cli
+        state: present
+        update_cache: yes
+      become: yes
+      when: ansible_os_family == "RedHat" and use_dnf
+      ignore_errors: yes
+      register: centos_az_cli_dnf_install
+
+    - name: Install Azure CLI (CentOS/RHEL with yum)
+      yum:
+        name: azure-cli
+        state: present
+        update_cache: yes
+      become: yes
+      when: ansible_os_family == "RedHat" and not use_dnf
+      ignore_errors: yes
+      register: centos_az_cli_yum_install
+
+    - name: Display Azure CLI installation result (CentOS/RHEL)
+      debug:
+        msg: |
+          {% if (centos_az_cli_dnf_install.failed | default(false)) and (centos_az_cli_yum_install.failed | default(false)) %}
+          ⚠️ Azure CLI installation failed. You can install manually:
+            curl -L https://aka.ms/InstallAzureCli | bash
+          {% else %}
+          ✅ Azure CLI installed successfully
+          {% endif %}
+      when: ansible_os_family == "RedHat"
+
+    # Azure CLI tools installation (removed due to syntax issues)
+    # Users can manually run: sudo az aks install-cli if needed
+
+    # ======================================
+    # TERRAFORM INSTALLATION
+    # ======================================
+
+    - name: Add HashiCorp repository (CentOS/RHEL)
+      shell: |
+        dnf config-manager --add-repo https://rpm.releases.hashicorp.com/RHEL/hashicorp.repo
+      become: yes
+      when: ansible_os_family == "RedHat" and use_dnf
+      ignore_errors: yes
+
+    - name: Install Terraform (CentOS/RHEL with dnf)
+      dnf:
+        name: terraform
+        state: present
+        update_cache: yes
+      become: yes
+      when: ansible_os_family == "RedHat" and use_dnf
+      ignore_errors: yes
+
+    - name: Install Terraform (CentOS/RHEL with yum)
+      yum:
+        name: terraform
+        state: present
+        update_cache: yes
+      become: yes
+      when: ansible_os_family == "RedHat" and not use_dnf
+      ignore_errors: yes
+
+    # ======================================
+    # DEVELOPMENT DIRECTORIES AND CONFIGURATION
+    # ======================================
+
+    - name: Create development directories
+      file:
+        path: "{{ item }}"
+        state: directory
+        mode: "0755"
+      loop:
+        - "{{ ansible_env.HOME }}/projects"
+        - "{{ ansible_env.HOME }}/scripts"
+        - "{{ ansible_env.HOME }}/.local/bin"
+
+    - name: Configure Git defaults
+      git_config:
+        name: "{{ item.name }}"
+        value: "{{ item.value }}"
+        scope: global
+      loop:
+        - { name: "init.defaultBranch", value: "main" }
+        - { name: "pull.rebase", value: "false" }
+      ignore_errors: yes
+
+    - name: Create useful aliases in shell (Linux)
+      lineinfile:
+        path: "{{ ansible_env.HOME }}/.bashrc"
+        line: "{{ item }}"
+        create: yes
+      loop:
+        - "alias ll='ls -la'"
+        - "alias la='ls -A'"
+        - "alias l='ls -CF'"
+        - "alias grep='grep --color=auto'"
+        - "alias top='htop'"
+        - 'export PATH="$HOME/.local/bin:$PATH"'
+        - "export EDITOR=vim"
+      when: ansible_os_family != "Darwin"
+
+    - name: Create useful aliases in shell (macOS)
+      lineinfile:
+        path: "{{ ansible_env.HOME }}/.zshrc"
+        line: "{{ item }}"
+        create: yes
+      loop:
+        - "alias ll='ls -la'"
+        - "alias la='ls -A'"
+        - "alias l='ls -CF'"
+        - 'export PATH="$HOME/.local/bin:$PATH"'
+      when: ansible_os_family == "Darwin"
+
+    # ======================================
+    # CREATE SETUP INFORMATION SCRIPT
+    # ======================================
+
+    - name: Create setup information script
+      copy:
+        dest: "{{ ansible_env.HOME }}/scripts/dev-setup-info.sh"
+        mode: "0755"
+        content: |
+          #!/bin/bash
+          # Development Environment Information
+
+          echo "🎉 Development Environment Setup Completed!"
+          echo ""
+          echo "🖥️  System: {{ ansible_distribution }} {{ ansible_distribution_version }} ({{ ansible_architecture }})"
+          echo ""
+          echo "📦 Installed Tools:"
+          {% if ansible_os_family == "Debian" %}
+          echo "  Core: git, vim, neovim, htop, tree, jq, build-essential"
+          echo "  Editors: VS Code"
+          echo "  Languages: Node.js/npm"
+          echo "  Modern CLI: fzf, ripgrep, bat, exa, ncdu"
+          echo "  Databases: SQLite, Redis tools"
+          echo "  Containers: Podman (Docker CLI compatible) + Podman Desktop (GUI)"
+          {% elif ansible_os_family == "RedHat" %}
+          echo "  Core: git, vim, neovim, htop, tree, jq, gcc, make, zsh, tmux"
+          echo "  Editors: VS Code"
+          echo "  Languages: Node.js/npm, Go, Rust"
+          echo "  Modern CLI: fzf, ripgrep, bat, eza, ncdu"
+          echo "  Databases: SQLite, Redis"
+          echo "  Containers: Podman (Docker CLI compatible) + Podman Desktop (GUI)"
+          {% elif ansible_os_family == "Darwin" %}
+          echo "  Core: git, vim, htop, tree, jq"
+          echo "  Editors: VS Code"
+          echo "  Languages: Node.js"
+          echo "  Containers: Docker Desktop + Docker Compose"
+          {% endif %}
+          echo "  Cloud: GitHub CLI, Azure CLI"
+          echo "  Kubernetes: kubectl, minikube"
+          echo ""
+          echo "📁 Created Directories:"
+          echo "  - ~/projects (your code projects)"
+          echo "  - ~/scripts (utility scripts)"
+          echo "  - ~/.local/bin (user binaries)"
+          echo ""
+          echo "🐳 Container Runtime:"
+          {% if ansible_os_family == "Darwin" %}
+          echo "  - Docker Desktop installed (native macOS experience)"
+          echo "  - Docker and docker-compose commands available natively"
+          echo "  - Start Docker Desktop from Applications folder"
+          echo "  - Full Docker ecosystem support"
+          {% else %}
+          echo "  - Podman installed with Docker CLI compatibility (podman-docker)"
+          echo "  - Use 'docker' commands normally (native + aliases)"
+          echo "  - Use 'docker-compose' commands (aliased to podman-compose)"
+          echo "  - More secure: rootless containers by default"
+          echo "  - No daemon required"
+          {% endif %}
+          echo ""
+          echo "📋 Next Steps:"
+          {% if ansible_os_family == "Darwin" %}
+          echo "  1. source ~/.zshrc  # Apply new aliases"
+          {% else %}
+          echo "  1. source ~/.bashrc  # Apply new aliases"
+          {% endif %}
+          echo "  2. Test containers: docker run hello-world"
+          echo "  3. Test cloud tools: gh --version && az --version"
+          echo "  4. Authenticate with GitHub: gh auth login"
+          echo "  5. Authenticate with Azure: az login"
+          echo "  6. Start coding in ~/projects/"
+          echo ""
+          echo "💡 Pro Tips:"
+          {% if ansible_os_family == "Darwin" %}
+          echo "  - Start Docker Desktop from Applications to use containers"
+          echo "  - Docker and docker-compose work natively (no aliases needed)"
+          echo "  - Docker Desktop includes Kubernetes support"
+          {% else %}
+          echo "  - Use 'docker' or 'podman' commands interchangeably"
+          echo "  - Use 'docker-compose' or 'podman-compose' interchangeably"
+          echo "  - Containers run rootless by default (more secure)"
+          echo "  - No Docker daemon issues!"
+          echo "  - Launch Podman Desktop GUI: flatpak run io.podman_desktop.PodmanDesktop"
+          {% endif %}
+          echo "  - Authenticate GitHub CLI: gh auth login"
+          echo "  - Authenticate Azure CLI: az login"
+          echo "  - Use 'az' for Azure operations"
+          {% if ansible_os_family == "Debian" %}
+          echo "  - Modern CLI tools: rg (ripgrep), bat, eza, fzf"
+          {% elif ansible_os_family == "RedHat" %}
+          echo "  - Modern CLI tools: rg (ripgrep), bat, eza (binary install), fzf"
+          echo "  - CentOS Stream compatible: Works with CentOS Stream 9/10"
+          echo "  - EPEL repository enabled for additional packages"
+          {% endif %}
+
+    - name: Display completion message
+      shell: |
+        cat << 'EOF'
+        🎉 Universal Development Environment Setup Completed!
+
+        🖥️  Target System: {{ ansible_distribution }} {{ ansible_distribution_version }} ({{ ansible_architecture }})
+
+        📦 Installed Components:
+        - Core development tools (git, vim, {% if ansible_os_family == "Darwin" %}Xcode tools{% else %}gcc/build-essential{% endif %}, etc.)
+        - Editors: VS Code
+        - Languages: Node.js for JavaScript development
+        {% if ansible_os_family == "Darwin" %}
+        - Containers: Docker Desktop + Docker Compose (native macOS)
+        {% else %}
+        - Containers: Podman (Docker CLI compatible, rootless) + Podman Desktop (GUI)
+        {% endif %}
+        - Cloud tools: GitHub CLI, Azure CLI
+        - Kubernetes: kubectl, minikube
+
+        📁 Environment Ready:
+        - Development directories created (~/projects, ~/scripts, ~/.local/bin)
+        - Shell aliases configured
+        - Git defaults set
+        {% if ansible_os_family == "Darwin" %}
+        - Docker Desktop ready (start from Applications)
+        {% else %}
+        - Container aliases configured (docker=podman)
+        - Podman Desktop available via Flatpak
+        {% endif %}
+
+        📋 Next Steps:
+        {% if ansible_os_family == "Darwin" %}
+        1. source ~/.zshrc
+        {% else %}
+        1. source ~/.bashrc
+        {% endif %}
+        2. Test containers: docker run hello-world
+        3. Test cloud tools: gh --version && az --version
+        4. Authenticate with GitHub: gh auth login
+        5. Authenticate with Azure: az login
+        6. Run detailed info: ~/scripts/dev-setup-info.sh
+        7. Start developing in ~/projects/
+
+        🚀 Happy coding!
+        EOF
