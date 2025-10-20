@@ -1,0 +1,917 @@
+---
+# CentOS Stream 9 Development Environment Setup
+# Streamlined Ansible playbook - CentOS Stream 9 only
+# Requires: Ansible installed via bootstrap-dev-env-centos.sh
+
+- name: CentOS Stream 9 Development Environment Setup
+  hosts: localhost
+  connection: local
+  gather_facts: yes
+  become: no
+
+  vars:
+    # Architecture mapping for binary downloads
+    arch_map:
+      x86_64: amd64
+      aarch64: arm64
+      armv7l: arm
+
+    # Get the correct architecture for downloads
+    download_arch: "{{ arch_map[ansible_architecture] | default('amd64') }}"
+
+    # Development packages organized by category
+    packages:
+      core:
+        - vim
+        - neovim
+        - htop
+        - tree
+        - jq
+        - unzip
+        - gcc
+        - gcc-c++
+        - make
+        - wget
+        - tar
+        - which
+        - sudo
+        - tmux
+        - chromium
+        - gtk3-devel
+        - libcanberra-gtk3
+      languages:
+        - golang
+        - rust
+        - cargo
+      modern_cli:
+        - fzf
+        - ripgrep
+        - bat
+        - ncdu
+      databases:
+        - sqlite
+      network:
+        - nmap-ncat
+      vcs:
+        - git-lfs
+        - meld
+
+    # Container runtime versions
+    kubectl_version: "v1.31.4"
+    minikube_version: "v1.34.0"
+
+  tasks:
+    - name: Display system information
+      debug:
+        msg: "Setting up development environment on {{ ansible_distribution }} {{ ansible_distribution_version }} ({{ ansible_architecture }})"
+
+    # ======================================
+    # PACKAGE REPOSITORY SETUP
+    # ======================================
+
+    - name: Install EPEL repository
+      dnf:
+        name: epel-release
+        state: present
+        update_cache: yes
+      become: yes
+      ignore_errors: yes
+
+    - name: Update package cache
+      dnf:
+        update_cache: yes
+      become: yes
+      ignore_errors: yes
+
+    # ======================================
+    # ADDITIONAL REPOSITORY SETUP
+    # ======================================
+
+    - name: Import Microsoft GPG key for VS Code
+      rpm_key:
+        state: present
+        key: https://packages.microsoft.com/keys/microsoft.asc
+      become: yes
+      ignore_errors: yes
+
+    - name: Add VS Code repository
+      yum_repository:
+        name: code
+        description: Visual Studio Code
+        baseurl: https://packages.microsoft.com/yumrepos/vscode
+        gpgcheck: yes
+        gpgkey: https://packages.microsoft.com/keys/microsoft.asc
+        enabled: yes
+      become: yes
+      ignore_errors: yes
+
+    - name: Add GitHub CLI repository
+      dnf:
+        name: "dnf-plugins-core"
+        state: present
+      become: yes
+      ignore_errors: yes
+
+    - name: Configure GitHub CLI repository
+      shell: |
+        dnf config-manager --add-repo https://cli.github.com/packages/rpm/gh-cli.repo
+      become: yes
+      ignore_errors: yes
+
+    - name: Detect CentOS/RHEL version for Azure CLI
+      set_fact:
+        rhel_major_version: "{{ ansible_distribution_major_version }}"
+
+    - name: Import Microsoft GPG key for Azure (RHEL 10+)
+      rpm_key:
+        key: https://packages.microsoft.com/keys/microsoft-2025.asc
+        state: present
+      become: yes
+      when: ansible_distribution_major_version|int >= 10
+      ignore_errors: yes
+
+    - name: Import Microsoft GPG key for Azure (RHEL 9 and below)
+      rpm_key:
+        key: https://packages.microsoft.com/keys/microsoft.asc
+        state: present
+      become: yes
+      when: ansible_distribution_major_version|int < 10
+      ignore_errors: yes
+
+    - name: Add Microsoft repository package
+      dnf:
+        name: "https://packages.microsoft.com/config/rhel/{{ ansible_distribution_major_version }}.0/packages-microsoft-prod.rpm"
+        state: present
+        disable_gpg_check: yes
+      become: yes
+      ignore_errors: yes
+
+    - name: Update package cache after repository setup
+      dnf:
+        update_cache: yes
+      become: yes
+      ignore_errors: yes
+
+    # ======================================
+    # CORE DEVELOPMENT PACKAGES
+    # ======================================
+
+    - name: Install core packages
+      dnf:
+        name: "{{ packages.core }}"
+        state: present
+        update_cache: yes
+      become: yes
+      ignore_errors: yes
+
+    - name: Install VS Code
+      dnf:
+        name: code
+        state: present
+      become: yes
+      ignore_errors: yes
+
+    - name: Install languages
+      dnf:
+        name: "{{ packages.languages }}"
+        state: present
+      become: yes
+      ignore_errors: yes
+
+    - name: Install modern CLI tools
+      dnf:
+        name: "{{ item }}"
+        state: present
+      become: yes
+      loop: "{{ packages.modern_cli }}"
+      ignore_errors: yes
+
+    - name: Install databases
+      dnf:
+        name: "{{ packages.databases }}"
+        state: present
+      become: yes
+      ignore_errors: yes
+
+    - name: Install network tools
+      dnf:
+        name: "{{ packages.network }}"
+        state: present
+      become: yes
+      ignore_errors: yes
+
+    - name: Install VCS tools
+      dnf:
+        name: "{{ packages.vcs }}"
+        state: present
+      become: yes
+      ignore_errors: yes
+
+    - name: Install GitHub CLI
+      dnf:
+        name: gh
+        state: present
+      become: yes
+      ignore_errors: yes
+
+    # Try to install Redis from EPEL
+    - name: Install Redis from EPEL
+      dnf:
+        name: redis
+        state: present
+        enablerepo: epel
+      become: yes
+      ignore_errors: yes
+      register: centos_redis
+
+    - name: Display Redis installation result
+      debug:
+        msg: |
+          {% if centos_redis.failed | default(false) %}
+          ⚠️ Redis not available in repositories. Install manually if needed:
+            sudo dnf install redis  # After enabling EPEL
+          {% else %}
+          ✅ Redis installation attempted from EPEL
+          {% endif %}
+
+    # Install eza manually (not available in standard repos)
+    - name: Check if eza is already installed
+      command: eza --version
+      register: eza_check
+      failed_when: false
+      changed_when: false
+
+    - name: Download and install eza binary
+      get_url:
+        url: "https://github.com/eza-community/eza/releases/latest/download/eza_{{ ansible_architecture }}-unknown-linux-gnu.tar.gz"
+        dest: /tmp/eza.tar.gz
+        mode: '0644'
+      when: eza_check.rc != 0
+      ignore_errors: yes
+
+    - name: Extract and install eza
+      unarchive:
+        src: /tmp/eza.tar.gz
+        dest: /usr/local/bin/
+        remote_src: yes
+        creates: /usr/local/bin/eza
+        mode: '0755'
+      become: yes
+      when: eza_check.rc != 0
+      ignore_errors: yes
+
+    # Handle Node.js installation
+    - name: Check if Node.js is already installed
+      command: node --version
+      register: nodejs_check
+      failed_when: false
+      changed_when: false
+
+    - name: Install Node.js and npm - handle conflicts
+      dnf:
+        name:
+          - nodejs
+          - npm
+        state: present
+        allowerasing: yes
+      become: yes
+      when: nodejs_check.rc != 0
+      ignore_errors: yes
+
+    - name: Display Node.js version if already installed
+      debug:
+        msg: "Node.js is already installed: {{ nodejs_check.stdout }}"
+      when: nodejs_check.rc == 0
+
+    # ======================================
+    # CONTAINER RUNTIME VERIFICATION
+    # ======================================
+
+    - name: Verify Podman installation
+      command: podman --version
+      register: podman_version
+      failed_when: false
+      changed_when: false
+
+    - name: Display Podman information
+      debug:
+        msg: |
+          Podman container runtime: {{ podman_version.stdout if podman_version.rc == 0 else 'Not installed' }}
+          Docker CLI compatibility: Available via podman-docker package
+          Test with: docker run hello-world
+
+    # ======================================
+    # KUBERNETES CONFIGURATION
+    # ======================================
+
+    - name: Verify kubectl installation
+      command: kubectl version --client --short
+      register: kubectl_version_check
+      failed_when: false
+      changed_when: false
+
+    - name: Verify Minikube installation
+      command: minikube version --short
+      register: minikube_version_check
+      failed_when: false
+      changed_when: false
+
+    - name: Display Kubernetes tools information
+      debug:
+        msg: |
+          kubectl: {{ kubectl_version_check.stdout if kubectl_version_check.rc == 0 else 'Not installed' }}
+          Minikube: {{ minikube_version_check.stdout if minikube_version_check.rc == 0 else 'Not installed' }}
+
+          Note: Minikube may have reliability issues on CentOS VMs. k3s is recommended as the primary Kubernetes solution.
+
+    # ======================================
+    # ARGO CLI TOOLS
+    # ======================================
+
+    - name: Check if Argo CD CLI is installed
+      command: argocd version --client --short
+      register: argocd_check
+      failed_when: false
+      changed_when: false
+
+    - name: Get latest Argo CD version
+      shell: |
+        curl -s https://api.github.com/repos/argoproj/argo-cd/releases/latest | grep '"tag_name"' | sed -E 's/.*"([^"]+)".*/\1/'
+      register: argocd_latest_version
+      when: argocd_check.rc != 0
+      failed_when: false
+      changed_when: false
+
+    - name: Download and install Argo CD CLI
+      get_url:
+        url: "https://github.com/argoproj/argo-cd/releases/download/{{ argocd_latest_version.stdout if argocd_latest_version.stdout != '' else 'v2.10.0' }}/argocd-linux-{{ download_arch }}"
+        dest: /usr/local/bin/argocd
+        mode: '0755'
+      become: yes
+      when: argocd_check.rc != 0
+      ignore_errors: yes
+
+    - name: Check if Argo Workflows CLI is installed
+      command: argo version --short
+      register: argo_check
+      failed_when: false
+      changed_when: false
+
+    - name: Get latest Argo Workflows version
+      shell: |
+        curl -s https://api.github.com/repos/argoproj/argo-workflows/releases/latest | grep '"tag_name"' | sed -E 's/.*"([^"]+)".*/\1/'
+      register: argo_latest_version
+      when: argo_check.rc != 0
+      failed_when: false
+      changed_when: false
+
+    - name: Download Argo Workflows CLI
+      get_url:
+        url: "https://github.com/argoproj/argo-workflows/releases/download/{{ argo_latest_version.stdout if argo_latest_version.stdout != '' else 'v3.5.0' }}/argo-linux-{{ download_arch }}.gz"
+        dest: /tmp/argo.gz
+        mode: '0644'
+      when: argo_check.rc != 0
+      ignore_errors: yes
+
+    - name: Extract and install Argo Workflows CLI
+      shell: |
+        gunzip -f /tmp/argo.gz
+        mv /tmp/argo /usr/local/bin/argo
+        chmod +x /usr/local/bin/argo
+      become: yes
+      when: argo_check.rc != 0
+      ignore_errors: yes
+
+    - name: Verify Argo CD CLI installation
+      command: argocd version --client --short
+      register: argocd_version_check
+      failed_when: false
+      changed_when: false
+
+    - name: Verify Argo Workflows CLI installation
+      command: argo version --short
+      register: argo_version_check
+      failed_when: false
+      changed_when: false
+
+    - name: Display Argo CLI tools information
+      debug:
+        msg: |
+          Argo CD CLI: {{ argocd_version_check.stdout if argocd_version_check.rc == 0 else 'Not installed' }}
+          Argo Workflows CLI: {{ argo_version_check.stdout if argo_version_check.rc == 0 else 'Not installed' }}
+
+          Usage:
+            - Argo CD: argocd login <server> --username <user>
+            - Argo Workflows: argo submit workflow.yaml
+
+    # ======================================
+    # K3S LIGHTWEIGHT KUBERNETES
+    # ======================================
+
+    - name: Check if k3s is already installed
+      command: k3s --version
+      register: k3s_check
+      failed_when: false
+      changed_when: false
+
+    - name: Install k3s (lightweight Kubernetes)
+      shell: |
+        curl -sfL https://get.k3s.io | sh -s - --write-kubeconfig-mode 644
+      become: yes
+      when: k3s_check.rc != 0
+      register: k3s_install
+      ignore_errors: yes
+
+    - name: Wait for k3s to be ready
+      wait_for:
+        timeout: 10
+      when: k3s_install is changed
+
+    - name: Create kubectl symlink to k3s
+      file:
+        src: /usr/local/bin/k3s
+        dest: /usr/local/bin/kubectl
+        state: link
+      become: yes
+      when: k3s_check.rc != 0 and not (kubectl_version_check.rc == 0)
+      ignore_errors: yes
+
+    - name: Create .kube directory
+      file:
+        path: "{{ ansible_env.HOME }}/.kube"
+        state: directory
+        mode: '0755'
+
+    - name: Copy k3s kubeconfig to user directory
+      shell: |
+        if [ -f /etc/rancher/k3s/k3s.yaml ]; then
+          cp /etc/rancher/k3s/k3s.yaml {{ ansible_env.HOME }}/.kube/config
+          chown {{ ansible_env.USER }}:{{ ansible_env.USER }} {{ ansible_env.HOME }}/.kube/config
+          chmod 600 {{ ansible_env.HOME }}/.kube/config
+        fi
+      become: yes
+      when: k3s_install is changed or k3s_check.rc == 0
+      ignore_errors: yes
+
+    - name: Check k3s service status
+      systemd:
+        name: k3s
+        state: started
+      become: yes
+      when: k3s_check.rc == 0 or k3s_install is changed
+      ignore_errors: yes
+
+    - name: Verify k3s installation
+      command: k3s --version
+      register: k3s_version_check
+      failed_when: false
+      changed_when: false
+
+    - name: Display k3s installation information
+      debug:
+        msg: |
+          k3s: {{ k3s_version_check.stdout if k3s_version_check.rc == 0 else 'Not installed' }}
+
+          k3s is a lightweight Kubernetes distribution perfect for:
+            - Production workloads
+            - Edge computing
+            - CI/CD pipelines
+            - IoT deployments
+
+          Commands:
+            - Check cluster: kubectl get nodes
+            - Check pods: kubectl get pods -A
+            - k3s service: sudo systemctl status k3s
+            - Uninstall: /usr/local/bin/k3s-uninstall.sh
+
+          Configuration:
+            - Kubeconfig: ~/.kube/config or /etc/rancher/k3s/k3s.yaml
+            - Service runs automatically on boot
+
+    # ======================================
+    # K9S - KUBERNETES MANAGEMENT TUI
+    # ======================================
+
+    - name: Check if k9s is already installed
+      command: k9s version --short
+      register: k9s_check
+      failed_when: false
+      changed_when: false
+
+    - name: Get latest k9s version
+      shell: |
+        curl -s https://api.github.com/repos/derailed/k9s/releases/latest | grep '"tag_name"' | sed -E 's/.*"([^"]+)".*/\1/'
+      register: k9s_latest_version
+      when: k9s_check.rc != 0
+      failed_when: false
+      changed_when: false
+
+    - name: Download k9s
+      get_url:
+        url: "https://github.com/derailed/k9s/releases/download/{{ k9s_latest_version.stdout if k9s_latest_version.stdout != '' else 'v0.32.5' }}/k9s_Linux_{{ download_arch }}.tar.gz"
+        dest: /tmp/k9s.tar.gz
+        mode: '0644'
+      when: k9s_check.rc != 0
+      ignore_errors: yes
+
+    - name: Extract and install k9s
+      shell: |
+        tar -xzf /tmp/k9s.tar.gz -C /tmp
+        mv /tmp/k9s /usr/local/bin/k9s
+        chmod +x /usr/local/bin/k9s
+        rm -f /tmp/k9s.tar.gz /tmp/LICENSE /tmp/README.md
+      become: yes
+      when: k9s_check.rc != 0
+      ignore_errors: yes
+
+    - name: Verify k9s installation
+      command: k9s version --short
+      register: k9s_version_check
+      failed_when: false
+      changed_when: false
+
+    - name: Display k9s installation information
+      debug:
+        msg: |
+          k9s: {{ k9s_version_check.stdout if k9s_version_check.rc == 0 else 'Not installed' }}
+
+          k9s is a terminal UI to interact with your Kubernetes clusters.
+
+          Features:
+            - Real-time cluster monitoring
+            - Easy pod logs viewing
+            - Resource editing and deletion
+            - Shell into pods
+            - Port-forwarding
+            - CPU/Memory metrics
+
+          Commands:
+            - Launch: k9s
+            - Navigate: arrow keys, Enter to drill down
+            - Search: / (forward slash)
+            - Help: ? (question mark)
+            - Quit: :quit or Ctrl+C
+
+    - name: Check if CPU controller is delegated
+      shell: |
+        user_id=$(id -u)
+        if [ -f "/sys/fs/cgroup/user.slice/user-${user_id}.slice/user@${user_id}.service/cgroup.controllers" ]; then
+          cat "/sys/fs/cgroup/user.slice/user-${user_id}.slice/user@${user_id}.service/cgroup.controllers"
+        else
+          echo "not_found"
+        fi
+      register: cgroup_controllers
+      become: false
+
+    - name: Display current cgroup controllers
+      debug:
+        msg: "Current cgroup controllers: {{ cgroup_controllers.stdout }}"
+
+    - name: Create systemd user service drop-in directory
+      file:
+        path: /etc/systemd/system/user@.service.d
+        state: directory
+        mode: '0755'
+      become: yes
+      when: "'cpu' not in cgroup_controllers.stdout and cgroup_controllers.stdout != 'not_found'"
+
+    - name: Configure systemd user service delegation
+      copy:
+        content: |
+          [Service]
+          Delegate=cpu cpuset io memory pids
+        dest: /etc/systemd/system/user@.service.d/delegate.conf
+        mode: '0644'
+      become: yes
+      register: delegation_config
+      when: "'cpu' not in cgroup_controllers.stdout and cgroup_controllers.stdout != 'not_found'"
+
+    - name: Reload systemd daemon
+      systemd:
+        daemon_reload: yes
+      become: yes
+      when: delegation_config is changed
+
+    - name: Restart user service to apply delegation
+      shell: |
+        user_id=$(id -u)
+        systemctl restart "user@${user_id}.service"
+      become: yes
+      when: delegation_config is changed
+
+    - name: Wait for user service to restart
+      wait_for:
+        timeout: 5
+      when: delegation_config is changed
+
+    - name: Verify CPU controller delegation
+      shell: |
+        user_id=$(id -u)
+        if [ -f "/sys/fs/cgroup/user.slice/user-${user_id}.slice/user@${user_id}.service/cgroup.controllers" ]; then
+          cat "/sys/fs/cgroup/user.slice/user-${user_id}.slice/user@${user_id}.service/cgroup.controllers"
+        else
+          echo "not_found"
+        fi
+      register: updated_cgroup_controllers
+      become: false
+      when: delegation_config is changed
+
+    - name: Display updated cgroup controllers
+      debug:
+        msg: |
+          {% if delegation_config is changed %}
+          Updated cgroup controllers: {{ updated_cgroup_controllers.stdout }}
+          {% if 'cpu' in updated_cgroup_controllers.stdout %}
+          ✅ CPU controller delegation enabled successfully
+          {% else %}
+          ⚠️  CPU controller delegation may not be active yet. A reboot may be required.
+          {% endif %}
+          {% else %}
+          CPU controller already delegated or delegation not needed
+          {% endif %}
+
+    - name: Configure Minikube for rootless Podman
+      shell: |
+        minikube config set rootless true
+        minikube config set driver podman
+        minikube config set container-runtime containerd
+      become: false
+      register: minikube_config
+      failed_when: false
+      changed_when: false
+
+    - name: Display Minikube configuration result
+      debug:
+        msg: |
+          🚢 Minikube configured for rootless Podman!
+
+          To start your Kubernetes cluster:
+            minikube start --force-systemd=false
+
+          To check cluster status:
+            minikube status
+            kubectl get nodes
+
+          Note: If this is the first setup, CPU delegation may require a reboot to be fully active.
+
+    # ======================================
+    # CLOUD CLI TOOLS
+    # ======================================
+
+    - name: Install Azure CLI
+      dnf:
+        name: azure-cli
+        state: present
+        update_cache: yes
+      become: yes
+      ignore_errors: yes
+      register: az_cli_install
+
+    - name: Display Azure CLI installation result
+      debug:
+        msg: |
+          {% if az_cli_install.failed | default(false) %}
+          ⚠️ Azure CLI installation failed. You can install manually:
+            curl -L https://aka.ms/InstallAzureCli | bash
+          {% else %}
+          ✅ Azure CLI installed successfully
+          {% endif %}
+
+    # ======================================
+    # TERRAFORM INSTALLATION
+    # ======================================
+
+    - name: Add HashiCorp repository
+      shell: |
+        dnf config-manager --add-repo https://rpm.releases.hashicorp.com/RHEL/hashicorp.repo
+      become: yes
+      ignore_errors: yes
+
+    - name: Install Terraform
+      dnf:
+        name: terraform
+        state: present
+        update_cache: yes
+      become: yes
+      ignore_errors: yes
+
+    # ======================================
+    # DIRENV - ENVIRONMENT VARIABLE MANAGER
+    # ======================================
+
+    - name: Check if direnv is already installed
+      command: direnv --version
+      register: direnv_check
+      failed_when: false
+      changed_when: false
+
+    - name: Install direnv via dnf
+      dnf:
+        name: direnv
+        state: present
+      become: yes
+      when: direnv_check.rc != 0
+      ignore_errors: yes
+      register: direnv_dnf_install
+
+    - name: Get latest direnv version (if dnf failed)
+      shell: |
+        curl -s https://api.github.com/repos/direnv/direnv/releases/latest | grep '"tag_name"' | sed -E 's/.*"([^"]+)".*/\1/'
+      register: direnv_latest_version
+      when: direnv_check.rc != 0 and direnv_dnf_install.failed | default(false)
+      failed_when: false
+      changed_when: false
+
+    - name: Download direnv binary (if dnf failed)
+      get_url:
+        url: "https://github.com/direnv/direnv/releases/download/{{ direnv_latest_version.stdout if direnv_latest_version.stdout != '' else 'v2.34.0' }}/direnv.linux-{{ download_arch }}"
+        dest: /usr/local/bin/direnv
+        mode: '0755'
+      become: yes
+      when: direnv_check.rc != 0 and direnv_dnf_install.failed | default(false)
+      ignore_errors: yes
+
+    - name: Configure direnv in bashrc
+      lineinfile:
+        path: "{{ ansible_env.HOME }}/.bashrc"
+        line: 'eval "$(direnv hook bash)"'
+        create: yes
+      when: direnv_check.rc == 0 or direnv_dnf_install.changed | default(false)
+
+    - name: Configure direnv in zshrc
+      lineinfile:
+        path: "{{ ansible_env.HOME }}/.zshrc"
+        line: 'eval "$(direnv hook zsh)"'
+        create: yes
+      when: direnv_check.rc == 0 or direnv_dnf_install.changed | default(false)
+
+    - name: Verify direnv installation
+      command: direnv --version
+      register: direnv_version_check
+      failed_when: false
+      changed_when: false
+
+    - name: Display direnv installation information
+      debug:
+        msg: |
+          direnv: {{ direnv_version_check.stdout if direnv_version_check.rc == 0 else 'Not installed' }}
+
+          direnv is an environment switcher for the shell. It loads/unloads environment
+          variables depending on the current directory.
+
+          Usage:
+            1. Create .envrc file in your project: echo 'export MY_VAR=value' > .envrc
+            2. Allow the file: direnv allow .
+            3. cd into the directory - variables are auto-loaded!
+            4. cd out - variables are auto-unloaded!
+
+          Examples:
+            - Load environment variables per project
+            - Automatically activate Python virtualenvs
+            - Set project-specific PATH additions
+            - Load secrets only when in project directory
+
+          Documentation: https://direnv.net/
+
+    # ======================================
+    # DEVELOPMENT DIRECTORIES AND CONFIGURATION
+    # ======================================
+
+    - name: Create development directories
+      file:
+        path: "{{ item }}"
+        state: directory
+        mode: "0755"
+      loop:
+        - "{{ ansible_env.HOME }}/projects"
+        - "{{ ansible_env.HOME }}/scripts"
+        - "{{ ansible_env.HOME }}/.local/bin"
+
+    - name: Configure Git defaults
+      shell: |
+        git config --global {{ item.name }} {{ item.value }}
+      loop:
+        - { name: "init.defaultBranch", value: "main" }
+        - { name: "pull.rebase", value: "false" }
+      ignore_errors: yes
+
+    - name: Create useful aliases in shell
+      lineinfile:
+        path: "{{ ansible_env.HOME }}/.bashrc"
+        line: "{{ item }}"
+        create: yes
+      loop:
+        - "alias ll='ls -la'"
+        - "alias la='ls -A'"
+        - "alias l='ls -CF'"
+        - "alias grep='grep --color=auto'"
+        - "alias top='htop'"
+        - "alias docker='podman'"
+        - "alias docker-compose='podman-compose'"
+        - 'export PATH="$HOME/.local/bin:$PATH"'
+        - "export EDITOR=vim"
+
+    # ======================================
+    # CREATE SETUP INFORMATION SCRIPT
+    # ======================================
+
+    - name: Create setup information script
+      copy:
+        dest: "{{ ansible_env.HOME }}/scripts/dev-setup-info.sh"
+        mode: "0755"
+        content: |
+          #!/bin/bash
+          # CentOS Stream 9 Development Environment Information
+
+          echo "🎉 CentOS Stream 9 Development Environment Setup Completed!"
+          echo ""
+          echo "🖥️  System: {{ ansible_distribution }} {{ ansible_distribution_version }} ({{ ansible_architecture }})"
+          echo ""
+          echo "📦 Installed Tools:"
+          echo "  Core: git, vim, neovim, htop, tree, jq, gcc, make, zsh, tmux"
+          echo "  Editors: VS Code"
+          echo "  Languages: Node.js/npm, Go, Rust"
+          echo "  Modern CLI: fzf, ripgrep, bat, eza, ncdu, direnv"
+          echo "  Databases: SQLite, Redis"
+          echo "  Containers: Podman (Docker CLI compatible) + Podman Desktop (GUI)"
+          echo "  Cloud: GitHub CLI, Azure CLI, Terraform"
+          echo "  Kubernetes: k3s (production), kubectl, k9s (TUI), minikube (optional)"
+          echo "  Argo: Argo CD CLI (argocd), Argo Workflows CLI (argo)"
+          echo ""
+          echo "⚠️  Note: k3s is recommended for CentOS (Minikube may have issues)"
+          echo ""
+          echo "📁 Created Directories:"
+          echo "  - ~/projects (your code projects)"
+          echo "  - ~/scripts (utility scripts)"
+          echo "  - ~/.local/bin (user binaries)"
+          echo ""
+          echo "🐳 Container Runtime:"
+          echo "  - Podman installed with Docker CLI compatibility (podman-docker)"
+          echo "  - Use 'docker' commands normally (native + aliases)"
+          echo "  - Use 'docker-compose' commands (aliased to podman-compose)"
+          echo "  - More secure: rootless containers by default"
+          echo "  - No daemon required"
+          echo ""
+          echo "📋 Next Steps:"
+          echo "  1. source ~/.bashrc  # Apply new aliases"
+          echo "  2. exec zsh  # Switch to zsh if installed"
+          echo "  3. Test containers: docker run hello-world"
+          echo "  4. Check k3s cluster: kubectl get nodes"
+          echo "  5. Launch k9s (Kubernetes TUI): k9s"
+          echo "  6. Deploy test app: kubectl create deployment nginx --image=nginx"
+          echo "  7. Test cloud tools: gh --version && az --version"
+          echo "  8. Test Argo CLIs: argocd version && argo version"
+          echo "  9. Authenticate with GitHub: gh auth login"
+          echo "  10. Authenticate with Azure: az login"
+          echo "  11. Start coding in ~/projects/"
+          echo ""
+          echo "💡 Pro Tips:"
+          echo "  - Use 'docker' or 'podman' commands interchangeably"
+          echo "  - Use 'docker-compose' or 'podman-compose' interchangeably"
+          echo "  - Containers run rootless by default (more secure)"
+          echo "  - No Docker daemon issues!"
+          echo "  - Launch Podman Desktop GUI: flatpak run io.podman_desktop.PodmanDesktop"
+          echo "  - Modern CLI tools: rg (ripgrep), bat, eza (binary install), fzf"
+          echo "  - CentOS Stream compatible: Works with CentOS Stream 9/10"
+          echo "  - EPEL repository enabled for additional packages"
+
+    - name: Display completion message
+      debug:
+        msg: |
+          🎉 CentOS Stream 9 Development Environment Setup Completed!
+
+          🖥️  Target System: {{ ansible_distribution }} {{ ansible_distribution_version }} ({{ ansible_architecture }})
+
+          📦 Installed Components:
+          - Core development tools (git, vim, gcc/build-essential, etc.)
+          - Editors: VS Code
+          - Languages: Node.js, Go, Rust
+          - Containers: Podman (Docker CLI compatible, rootless) + Podman Desktop (GUI)
+          - Cloud tools: GitHub CLI, Azure CLI, Terraform
+          - Kubernetes: k3s (production-ready), kubectl, k9s (TUI), minikube (optional)
+          - Argo: Argo CD CLI, Argo Workflows CLI
+
+          ⚠️  k3s is recommended for CentOS VMs (Minikube may have reliability issues)
+
+          📁 Environment Ready:
+          - Development directories created (~/projects, ~/scripts, ~/.local/bin)
+          - Shell aliases configured (docker=podman, docker-compose=podman-compose)
+          - Git defaults set
+          - Container aliases configured
+          - Podman Desktop available via Flatpak
+
+          📋 Next Steps:
+          1. source ~/.bashrc
+          2. exec zsh  # If zsh was installed
+          3. Test containers: docker run hello-world
+          4. Check k3s cluster: kubectl get nodes
+          5. Launch k9s (Kubernetes TUI): k9s
+          6. Deploy test app: kubectl create deployment nginx --image=nginx
+          7. Test cloud tools: gh --version && az --version
+          8. Test Argo CLIs: argocd version && argo version
+          9. Authenticate with GitHub: gh auth login
+          10. Authenticate with Azure: az login
+          11. Run detailed info: ~/scripts/dev-setup-info.sh
+          12. Start developing in ~/projects/
+
+          🚀 Happy coding on CentOS Stream 9!
