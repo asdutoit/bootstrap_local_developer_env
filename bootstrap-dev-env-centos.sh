@@ -348,19 +348,29 @@ fi
 if ! command_exists k3s; then
     log "Installing k3s (lightweight Kubernetes)..."
 
+    # If kubectl is already installed, back it up temporarily to let k3s create its symlink
+    KUBECTL_BACKUP=""
+    if command_exists kubectl && [ ! -L /usr/local/bin/kubectl ]; then
+        log "Backing up standalone kubectl to allow k3s symlink creation..."
+        KUBECTL_BACKUP="/usr/local/bin/kubectl.backup"
+        sudo mv /usr/local/bin/kubectl "$KUBECTL_BACKUP"
+    fi
+
     # k3s installation script automatically detects architecture and installs
     # By default, k3s starts automatically as a systemd service
-    if curl -sfL https://get.k3s.io | sh -s - --write-kubeconfig-mode 644; then
+    # k3s will create symlinks for kubectl, crictl, and ctr
+    if curl -sfL https://get.k3s.io | INSTALL_K3S_SKIP_SELINUX_RPM=true sh -s - --write-kubeconfig-mode 644; then
         log_success "k3s installed successfully"
 
         # Wait for k3s to be ready
         log "Waiting for k3s to be ready..."
         sleep 5
 
-        # Create symlink for kubectl to use k3s
-        if ! command_exists kubectl; then
-            sudo ln -s /usr/local/bin/k3s /usr/local/bin/kubectl
-            log_success "kubectl symlinked to k3s"
+        # If we backed up kubectl, inform the user
+        if [ -n "$KUBECTL_BACKUP" ] && [ -f "$KUBECTL_BACKUP" ]; then
+            log "Standalone kubectl backed up to: $KUBECTL_BACKUP"
+            log "Using k3s kubectl symlink at /usr/local/bin/kubectl"
+            log "You can restore standalone kubectl with: sudo mv $KUBECTL_BACKUP /usr/local/bin/kubectl"
         fi
 
         # Set up kubeconfig for current user
@@ -423,45 +433,65 @@ fi
 
 # Set zsh as default shell
 ZSH_PATH=$(which zsh)
-CURRENT_SHELL=$(echo $SHELL)
+# Check actual shell in /etc/passwd, not $SHELL variable (which won't update until logout)
+CURRENT_PASSWD_SHELL=$(getent passwd "$USER" | cut -d: -f7)
 
-if [ "$CURRENT_SHELL" != "$ZSH_PATH" ]; then
+if [ "$CURRENT_PASSWD_SHELL" != "$ZSH_PATH" ]; then
     log "Setting zsh as default shell..."
+    log "Current shell in /etc/passwd: $CURRENT_PASSWD_SHELL"
 
     # Ensure zsh is in /etc/shells
-    if ! grep -q "$ZSH_PATH" /etc/shells 2>/dev/null; then
+    if ! grep -q "^$ZSH_PATH$" /etc/shells 2>/dev/null; then
         log "Adding $ZSH_PATH to /etc/shells..."
         echo "$ZSH_PATH" | sudo tee -a /etc/shells > /dev/null
+        log_success "Added $ZSH_PATH to /etc/shells"
     fi
 
-    # Try to change shell
+    # Try to change shell using multiple methods
     SHELL_CHANGED=false
 
+    # Method 1: chsh
     if sudo chsh -s "$ZSH_PATH" "$USER" 2>/dev/null; then
         SHELL_CHANGED=true
         log_success "Default shell changed to zsh (via chsh)"
-    elif sudo usermod -s "$ZSH_PATH" "$USER" 2>/dev/null; then
+    fi
+
+    # Method 2: usermod (if chsh failed)
+    if [ "$SHELL_CHANGED" = false ] && sudo usermod -s "$ZSH_PATH" "$USER" 2>/dev/null; then
         SHELL_CHANGED=true
         log_success "Default shell changed to zsh (via usermod)"
-    else
-        log_warning "Failed to change default shell automatically"
-        log "Please run manually after the script completes:"
-        log "  sudo chsh -s $ZSH_PATH $USER"
+    fi
+
+    # Method 3: Direct /etc/passwd edit (if both failed)
+    if [ "$SHELL_CHANGED" = false ]; then
+        log_warning "Standard methods failed, attempting direct /etc/passwd modification..."
+        if sudo sed -i "s|^\($USER:.*:\).*$|\1$ZSH_PATH|" /etc/passwd; then
+            SHELL_CHANGED=true
+            log_success "Default shell changed to zsh (via direct /etc/passwd edit)"
+        else
+            log_error "Failed to change default shell automatically"
+            log "Please run manually: sudo chsh -s $ZSH_PATH $USER"
+        fi
     fi
 
     # Verify the change
-    if [ "$SHELL_CHANGED" = true ]; then
-        PASSWD_SHELL=$(getent passwd "$USER" | cut -d: -f7)
-        if [ "$PASSWD_SHELL" = "$ZSH_PATH" ]; then
-            log_success "✓ Verified: Default shell is now zsh in /etc/passwd"
-            log "You must LOG OUT and LOG BACK IN for the change to take effect"
-        else
-            log_warning "Shell change may not have taken effect"
-            log "Current shell in /etc/passwd: $PASSWD_SHELL"
-        fi
+    sleep 1  # Brief pause to ensure filesystem sync
+    VERIFY_SHELL=$(getent passwd "$USER" | cut -d: -f7)
+    if [ "$VERIFY_SHELL" = "$ZSH_PATH" ]; then
+        log_success "✓ Verified: Default shell is now $ZSH_PATH in /etc/passwd"
+        log "⚠️  IMPORTANT: You MUST completely LOG OUT and LOG BACK IN for zsh to take effect"
+        log "   - SSH users: type 'exit', then reconnect"
+        log "   - Console users: full logout/login (not just new terminal)"
+        log "   - Quick test (current session only): exec zsh"
+    else
+        log_warning "Shell verification failed!"
+        log "Expected: $ZSH_PATH"
+        log "Found: $VERIFY_SHELL"
+        log "You may need to manually run: sudo chsh -s $ZSH_PATH $USER"
     fi
 else
-    log_success "zsh is already the default shell"
+    log_success "zsh is already the default shell in /etc/passwd"
+    log "Current shell: $CURRENT_PASSWD_SHELL"
 fi
 
 # Install Oh My Zsh
@@ -509,10 +539,18 @@ else
 fi
 
 # Configure Starship in zsh
-if command_exists starship && [ -f "$HOME/.zshrc" ]; then
-    if ! grep -q "starship init zsh" "$HOME/.zshrc"; then
-        echo 'eval "$(starship init zsh)"' >> "$HOME/.zshrc"
-        log_success "Starship configured in zsh"
+if command_exists starship; then
+    if [ -f "$HOME/.zshrc" ]; then
+        if ! grep -q "starship init zsh" "$HOME/.zshrc"; then
+            echo '' >> "$HOME/.zshrc"
+            echo '# Starship prompt' >> "$HOME/.zshrc"
+            echo 'eval "$(starship init zsh)"' >> "$HOME/.zshrc"
+            log_success "Starship configured in zsh"
+        else
+            log_success "Starship already configured in zsh"
+        fi
+    else
+        log_warning "~/.zshrc not found, Starship will be configured after Oh My Zsh creates it"
     fi
 fi
 
